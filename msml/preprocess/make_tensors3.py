@@ -1,0 +1,1116 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Based on previous work by Elsa CLAUDE - CHUL of Québec, Canada
+February 2020 - August 2020
+Modified by Simon Pelletier
+June 2021
+
+"""
+
+from datetime import datetime
+
+start_time = datetime.now()
+import os
+import glob
+import multiprocessing
+import pandas as pd
+import numpy as np
+from sklearn.feature_selection import mutual_info_classif, f_classif  # , RFE, RFECV
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from PIL import Image
+from matplotlib import cm
+from pickle import dump
+
+
+def get_feature_selection_method(model_name):
+    if model_name == 'mutual_info_classif':
+        model = mutual_info_classif
+    elif model_name == 'f_classif':
+        model = f_classif
+    # TODO these won't work, need to implement with an estimator
+    # elif model_name == 'RFE':
+    #     model = RFE
+    # elif model_name == 'RFECV':
+    #     model = RFECV
+    else:
+        exit('Feature selection method unavailable. Must be one of [mutual_info_classif, f_classif, RFE, RFECV]')
+    return model
+
+
+def keep_only_not_zeros(df, threshold=0):
+    df = df.loc[:, (df != 0).any(axis=0)]
+    return df, df.columns
+
+
+def keep_not_zeros(data, threshold=0.3):
+    """
+    Removes columns that are all zeros
+    :param data:
+    :return:
+    """
+    not_zeros_cols = np.array(
+        [i for i in range(data.values.shape[1]) if sum(data.values[:, i] > 0) / len(data) > threshold]
+    )
+    # print("Removing zeros...")
+    data = data.iloc[:, not_zeros_cols]
+
+    return data, data.columns
+
+
+def keep_not_duplicated(data, threshold=0.95):
+    """
+    Removes columns that are all zeros
+    :param data:
+    :return:
+    """
+    print("Finding columns with mostly duplicate values...")
+    not_duplicates_cols = []
+    for i in range(data.values.shape[1]):
+        for val in list(set(data.values[:, i])):
+            if (sum(data.values[:, i] != val) / len(data)) > threshold:
+                not_duplicates_cols += [i]
+    not_duplicates_cols = np.array(not_duplicates_cols)
+    # if threshold > 0:
+    data = data.iloc[:, not_duplicates_cols]
+    # else:
+    # The code above returns the same thing as above if threshold is 0, but it's faster
+    #     data = data.loc[:, (data != 0).any(axis=0)]
+
+    return data, not_duplicates_cols
+
+
+class MultiKeepNotFunctions:
+    """
+    Class for multiprocessing of keep_not_zeros and keep_not_duplicated
+    """
+
+    def __init__(self, function, data, threshold, n_processes):
+        """
+        :param function:
+        :param data:
+        :return:
+        """
+
+        self.function = function
+        self.data = data
+        self.threshold = threshold
+        self.n_processes = n_processes
+
+    def process(self, i):
+        """
+        Process function
+        """
+        print(f"Process: {i}/{self.n_processes}")
+        return self.function(self.data[i], threshold=self.threshold)
+
+
+class Process:
+    """
+    Class for multiprocessing of feature selection
+    """
+
+    def __init__(self, model, data, labels, n_processes):
+        """
+        :param model:
+        :param data:
+        :param labels:
+        :return:
+        """
+
+        self.model = model
+        self.data = data
+        self.labels = labels
+        self.n_processes = n_processes
+
+    def process(self, i):
+        """
+        Process function
+        """
+        print(f"Process: {i}/{self.n_processes}")
+        results = self.model(self.data[i], self.labels)
+        if self.model != mutual_info_classif:
+            results = results[0]
+        return pd.DataFrame(
+            data=results,
+            index=self.data[i].columns,
+            columns=['score']
+        )
+
+    def get_n_cols(self):
+        """
+        Gets n columns. Mainly just to have a second class so pylint does not complain.
+        """
+        return len(self.data.index)
+
+
+def process_data(data, cats, model, cutoff, dirname, k=10000, binary=False, run_name='', combat_corr=0):
+    if binary:
+        label = 'BLK'
+    else:
+        label = 'BACT'
+    if k == -1:
+        k = data["train"].shape[1]
+
+    inds_zeros = [i for i, x in enumerate(data['train'].sum(0)) if x == 0]
+
+    print(
+        f"Out of {data['train'].shape[1]} features, {len(inds_zeros)} columns are only zeros")
+
+    not_zeros_cols = []
+    not_zeros_cols.extend([i for i, sum0 in enumerate(data['train'].sum(0)) if sum0 > 0])
+    data['train'] = data['train'][data['train'].columns[not_zeros_cols]]
+    data['pool'] = data['pool'][data['pool'].columns[not_zeros_cols]]
+    # if data['test'] is not None:
+    #     data['test'] = data['test'][data['test'].columns[not_zeros_cols]]
+
+    # assert all columns with only 0s are removed
+    assert len([i for i, x in enumerate(data['train'].sum(0)) if x == 0]) == 0
+    # data['train'].to_csv('train_df.csv')
+    dframe_list = split_df(data['train'], cols_per_split=int(1e3))
+
+    process = Process(model, dframe_list, cats['train'], np.ceil(data["train"].shape[1] / int(1e3)))
+    pool = multiprocessing.Pool(int(multiprocessing.cpu_count() / 10))
+
+    mi = pd.concat(
+        pool.map(process.process,
+                 range(len(dframe_list))
+                 )
+    )
+
+    top_indices = np.argsort(mi.values.reshape(-1))[::-1]
+    top_scores = np.sort(mi.values.reshape(-1))[::-1]
+    top_k_indices = top_indices[:k].reshape(-1)
+    top_k_scores = top_scores[:k].reshape(-1)
+    top_columns = data['train'].columns[top_indices]
+    top_k_columns = data['train'].columns[top_k_indices]
+
+    features_scores = pd.DataFrame(top_k_scores.reshape([-1, 1]),
+                                   columns=['score'],
+                                   index=top_k_columns)
+    os.makedirs(f'{dirname}/{run_name}/', exist_ok=True)
+    features_scores.to_csv(
+        f'{dirname}/{run_name}/{args.feature_selection}_scores_binary{str(binary)}_{run_name}.csv',
+        index_label='minp_maxp_rt_mz')
+
+    data['train'] = pd.DataFrame(data['train'].iloc[:, top_k_indices],
+                                 columns=top_k_columns,
+                                 index=data['train'].index)
+    data['pool'] = pd.DataFrame(data['pool'].iloc[:, top_k_indices],
+                                columns=top_k_columns,
+                                index=data['pool'].index)
+
+    data['train'].iloc[:] = np.round(np.nan_to_num(data['train']), 2)
+    data['pool'].iloc[:] = np.round(np.nan_to_num(data['pool']), 2)
+
+    data['train'].to_csv(
+        f'{dirname}/{run_name}/{label}_train_inputs_{run_name}.csv',
+        index=True, index_label='ID')
+    data['pool'].to_csv(
+        f'{dirname}/{run_name}/{label}_pool_inputs_{run_name}.csv',
+        index=True, index_label='ID')
+
+    indices = np.argwhere(features_scores.to_numpy()[:, 0] > cutoff)[:, 0]
+    features_scores_gt = pd.DataFrame(top_k_scores[indices].reshape(-1, 1),
+                                      columns=['score'],
+                                      index=features_scores.index[indices])
+    features_scores_gt.to_csv(
+        f'{dirname}/{run_name}/{args.feature_selection}_scores_binary{str(binary)}_gt{cutoff}_{run_name}.csv',
+        index_label='minp_maxp_rt_mz')
+
+    data['train'] = data['train'][top_k_columns[indices]]
+    data['pool'] = data['pool'][top_k_columns[indices]]
+
+    if combat_corr:
+        data['train'].to_csv(
+            f'{dirname}/{run_name}/{label}_train_inputs_gt{cutoff}_{run_name}_combat.csv',
+            index=True, index_label='ID')
+        data['pool'].to_csv(
+            f'{dirname}/{run_name}/{label}_pool_inputs_gt{cutoff}_{run_name}_combat.csv',
+            index=True, index_label='ID')
+    else:
+        data['train'].to_csv(
+            f'{dirname}/{run_name}/{label}_train_inputs_gt{cutoff}_{run_name}.csv',
+            index=True, index_label='ID')
+        data['pool'].to_csv(
+            f'{dirname}/{run_name}/{label}_pool_inputs_gt{cutoff}_{run_name}.csv',
+            index=True, index_label='ID')
+
+    '''if data['test'] is not None:
+        data['test'] = pd.DataFrame(data['test'].iloc[:, top_k_indices],
+                            columns=top_k_columns,
+                            index=data['test'].index)
+        data['test'].iloc[:] = np.round(np.nan_to_num(data['test']), 2)
+        data['test'].to_csv(
+            f'{dirname}/{run_name}/{label}_test_inputs_{run_name}.csv',
+            index=True, index_label='ID')
+        data['test'] = data['test'][top_k_columns[top_k_scores > cutoff]]
+        data['test'].to_csv(
+            f'{dirname}/{run_name}/{label}_test_inputs_gt{cutoff}_{run_name}.csv',
+            index=True, index_label='ID')
+        '''
+
+
+def count_array(arr):
+    """
+    Counts elements in array
+
+    :param arr:
+    :return:
+    """
+    elements_count = {}
+    for element in arr:
+        if element in elements_count:
+            elements_count[element] += 1
+        else:
+            elements_count[element] = 1
+    to_remove = []
+    for key, value in elements_count.items():
+        print(f"{key}: {value}")
+        if value <= 2:
+            to_remove += [key]
+
+    return to_remove
+
+
+class MakeTensorsMultiprocess:
+    """
+    Concat
+    """
+
+    def __init__(self, tsv_list, labels_list, mz_stride, rt_stride, test_run, n_samples, log, path, save):
+        """
+        :param tsv_list:
+        :param labels_list:
+        :param test_run:
+        :return:
+        """
+        os.makedirs(f'{path}/images', exist_ok=True)
+        os.makedirs(f'{path}/csv', exist_ok=True)
+        self.path = path
+        self.tsv_list = tsv_list
+        self.labels_list = labels_list
+        self.save = save
+        self.test_run = test_run
+        self.mz_stride = mz_stride
+        self.rt_stride = rt_stride
+        self.log2 = log
+        # self.final_list = []
+        # self.labels = []
+        if n_samples != -1:
+            self.tsv_list = self.tsv_list[:n_samples]
+            self.labels_list = self.labels_list[:n_samples]
+
+    def process(self, i):
+        """
+
+        This process makes a 'tensor' (list of dataframes)
+        :param i:
+        :return:
+        """
+        path_list = self.path.split('matrices')[1].split('/')
+        while ("" in path_list):
+            path_list.remove("")
+        mz_bin, rt_bin = path_list[:2]
+        mz_bin = mz_bin.split('mz')[1]
+        rt_bin = rt_bin.split('rt')[1]
+
+        if float(mz_bin) >= 1:
+            mz_bin = int(mz_bin)
+        else:
+            mz_bin = float(mz_bin)
+        if float(rt_bin) >= 1:
+            rt_bin = int(rt_bin)
+        else:
+            rt_bin = float(rt_bin)
+
+        if mz_bin < 1:
+            mz_rounding = len(str(mz_bin).split('.')[-1]) + 1
+        else:
+            mz_rounding = 1
+
+        if rt_bin < 1:
+            rt_rounding = len(str(rt_bin).split('.')[-1]) + 1
+        else:
+            rt_rounding = 1
+
+        file, label = self.tsv_list[i], self.labels_list[i]
+        try:
+            tsv = pd.read_csv(file, header=0, sep='\t', dtype=np.float64)
+        except:
+            exit('Error reading csv')
+        print(f"Processing file {i}: {file} min_parents: min={tsv.min_parent_mz.min()} max={tsv.min_parent_mz.max()}")
+
+        tsv = tsv[tsv.bin_intensity != 0]
+
+        tsv = tsv.drop(['max_parent_mz'], axis=1)
+        tsv['mz_bin'] = tsv['mz_bin'].round(2)
+
+        min_parents_mz = np.unique(tsv.min_parent_mz)
+        interval = min_parents_mz[1] - min_parents_mz[0]
+        if self.mz_stride:
+            mz_stride = mz_bin / 2
+        else:
+            mz_stride = 0
+        if self.rt_stride:
+            rt_stride = rt_bin / 2
+        else:
+            rt_stride = 0
+
+        final = {min_parent: pd.DataFrame(
+            np.zeros([int(np.ceil(tsv.rt_bin.max() / rt_bin)) + 1, int(np.ceil(tsv.mz_bin.max() / mz_bin)) + 1]),
+            dtype=np.float64,
+            index=np.arange(0, tsv.rt_bin.max() + rt_bin, rt_bin).round(rt_rounding) - rt_stride,
+            columns=np.arange(0, tsv.mz_bin.max() + mz_bin, mz_bin).round(mz_rounding) - mz_stride
+        ) for min_parent in np.arange(int(tsv.min_parent_mz.min()), int(tsv.min_parent_mz.max()) + interval, interval)}
+        for i in list(final.keys()):
+            final[i].index = np.round(final[i].index, rt_rounding)
+            final[i].columns = np.round(final[i].columns, mz_rounding)
+
+        for i, line in enumerate(tsv.values):
+            min_parent, rt, mz, intensity = line
+            if np.isnan(rt) or np.isnan(mz) or np.isnan(min_parent):
+                continue
+            if self.rt_stride:
+                tmp_rt = np.floor(np.round(rt / rt_bin, 8)) * rt_bin
+                if rt % (rt_bin / 2) > (rt_bin / 2):
+                    tmp_rt += rt_bin / 2
+                else:
+                    tmp_rt -= rt_bin / 2
+                rt = tmp_rt
+                # if not self.mz_stride:
+                # mz = np.floor(np.round(mz/mz_bin, 8))*mz_bin
+            else:
+                rt = np.floor(np.round(rt / rt_bin, 8)) * rt_bin
+
+            if self.mz_stride:
+                tmp_mz = np.floor(np.round(mz / mz_bin, 8)) * mz_bin
+                if mz % (mz_bin / 2) > (mz_bin / 2):
+                    tmp_mz += mz_bin / 2
+                else:
+                    tmp_mz -= mz_bin / 2
+                mz = tmp_mz
+                # if not self.rt_stride:
+                # rt = np.floor(np.round(rt/rt_bin, 8))*rt_bin
+            else:
+                # rt = np.floor(np.round(rt/rt_bin, 8))*rt_bin
+                mz = np.floor(np.round(mz / mz_bin, 8)) * mz_bin
+            if rt_rounding != 0:
+                rt = np.round(rt, rt_rounding)
+            if mz_rounding != 0:
+                mz = np.round(mz, mz_rounding)
+            # final[min_parent][mz][rt] += np.log1p(intensity)
+            if self.log2 == 'inloop':
+                final[min_parent][mz][rt] += np.log1p(intensity)
+            else:
+                final[min_parent][mz][rt] += intensity
+            if self.test_run and i == 10:
+                break
+        os.makedirs(f"{self.path}/nibabel/", exist_ok=True)
+        # img = nib.Nifti1Image(np.stack(list(final.values())), np.eye(4))
+        # nib.save(img, f'{self.path}/nibabel/{label}.nii')
+        if self.save:
+            _ = [self.save_images_and_csv(matrix, f"{label}", min_parent) for i, (min_parent, matrix) in
+                 enumerate(zip(final, list(final.values())))]
+
+        return np.stack(list(final.values())), list(final.keys()), label
+
+    def n_samples(self):
+        """
+        Gets n samples. Mainly just to have a second class so pylint does not complain.
+        """
+        return len(self.tsv_list)
+
+    def save_images_and_csv(self, final, label, i):
+        os.makedirs(f"{self.path}/csv3d/{label}/", exist_ok=True)
+        os.makedirs(f"{self.path}/images3d/{label}/", exist_ok=True)
+        final.to_csv(f"{self.path}/csv3d/{label}/{label}_{i}.csv", index_label='ID')
+        im = Image.fromarray(np.uint8(cm.gist_earth(final.values) * 255))
+        im.save(f"{self.path}/images3d/{label}/{label}_{i}.png")
+        im.close()
+
+
+def make_lists(dirinput, path, run_name):
+    """
+    Makes lists
+
+    :param dirinput:
+    :param path:
+    :param run_name:
+    :return:
+    """
+    tsv_list = glob.glob(dirinput + '*.tsv')
+    # Initiate variables
+    samples = []
+    # pool_files = []
+
+    # for _, file in enumerate(tsv_list):
+    #     if 'pool' in file:
+    #         pool_files += [file]
+
+    # for psample in pool_files:
+    #     tsv_list.remove(psample)
+    labels_list = []
+    for _, file in enumerate(tsv_list):
+        if len(file.split('\\')) > 1:
+            sample = file.split('\\')[-1].split('.')[0]
+        else:
+            sample = file.split('/')[-1].split('.')[0]
+
+        samples.append(sample)
+        tmp = sample.split('_')
+        batch = tmp[0]
+        # sample_split = sample.split(split_on)[1].split('_')
+        # if sample_split[2] != 'validation':
+        #     tmp = sample_split[2:4]
+        # else:
+        # tmp = sample_split[1:3]
+
+        label = f"{batch}_{'_'.join(tmp[-3:-1])}"
+        labels_list.append(label)
+
+    categories = [x.split('_')[0] for x in labels_list]
+
+    names_df = pd.DataFrame(
+        np.concatenate(
+            (np.array(labels_list).reshape((-1, 1)),
+             np.array(samples).reshape((-1, 1)),
+             np.array(categories).reshape((-1, 1)),
+             ), 1)
+    )
+    os.makedirs(path, exist_ok=True)
+    names_df.to_csv(f'{path}/fnames_ids_{run_name}.csv', index=False,
+                    header=['ID', 'fname', 'category'])
+    return {
+        "samples": samples,
+        "tsv": tsv_list,
+        "labels": labels_list,
+    }
+
+
+def split_df(dframe, cols_per_split):
+    n_partitions = int(np.ceil(dframe.shape[1] / cols_per_split))
+    dframes_list = [
+        dframe.iloc[:, x * cols_per_split:(x + 1) * cols_per_split]
+        if x < n_partitions - 1 else dframe.iloc[:, x * cols_per_split:]
+        for x in range(n_partitions)
+    ]
+    try:
+        assert np.sum(
+            [df1.shape[1] for df1 in dframes_list]) == dframe.shape[1]
+    except AssertionError as err:
+        print(err, "\nOops! The list of dataframes don't have the same shape as inial dataframe.")
+    return dframes_list
+
+
+def make_matrix(finals, labels):
+    # indices_columns = pd.MultiIndex.from_product([finals[0].index, finals[0].columns])
+    new_columns = [f'{x}_{y}' for x in finals[0].index for y in finals[0].columns]
+    finals = pd.concat(
+        [pd.DataFrame(final.values.flatten().reshape(1, -1), columns=new_columns)
+         for final in finals], 0
+    )
+    finals.index = labels
+    return finals
+
+
+def concat_and_transpose(dirinput, dirname, mz_stride, rt_stride, args_dict, names_to_keep=None, features=None):
+    """
+    Concatenate and transpose
+
+    :param dirinput:
+    :param dirname:
+    :param args_dict:
+    :return:
+    """
+    # Get list of all wanted tsv
+
+    # path = f"{dirname}/"
+    lists = make_lists(dirinput, dirname, args_dict.run_name)
+    if names_to_keep is not None:
+        inds_to_keep = [i for i, x in enumerate(lists['labels']) if
+                        x.split('_')[1] in names_to_keep]
+        lists["tsv"] = np.array(lists['tsv'])[inds_to_keep].tolist()
+        lists["labels"] = np.array(lists['labels'])[inds_to_keep].tolist()
+    concat = MakeTensorsMultiprocess(lists["tsv"], lists["labels"], mz_stride, rt_stride, args_dict.test_run,
+                                     args_dict.n_samples, args_dict.log2, dirname, args_dict.save)
+
+    pool = multiprocessing.Pool(multiprocessing.cpu_count() - 1)
+
+    data_matrix = pool.map(concat.process,
+                           range(len(concat.tsv_list))
+                           )
+    mz_min_parents = [x.round(0) for x in data_matrix[0][1]]
+    labels = [x[2] for x in data_matrix]
+    # Find max of each dimension
+    if features is not None:
+        max_rt1 = int(np.ceil(max([float(x.split('_')[1]) for x in features]) / float(args_dict.rt_bin)))
+        max_mz1 = int(np.ceil(max([float(x.split('_')[2]) for x in features]) / float(args_dict.mz_bin)))
+        max_rt2 = max([x[0].shape[1] for x in data_matrix])
+        max_mz2 = max([x[0].shape[2] for x in data_matrix])
+        max_rt = int(max(max_rt1, max_rt2))
+        max_mz = int(max(max_mz1, max_mz2))
+    else:
+        max_rt = max([x[0].shape[1] for x in data_matrix])
+        max_mz = max([x[0].shape[2] for x in data_matrix])
+
+    # assert type(max_rt) == int and type(max_mz) == int
+
+    max_min_mz_parent = max([x[0].shape[0] for x in data_matrix])
+    # data_matrix = np.concatenate(([x[0] for x in data_matrix]))
+    if args_dict.rt_rounding == 0:
+        rt_bin = int(args_dict.rt_bin)
+    else:
+        rt_bin = np.round(float(args_dict.rt_bin), args_dict.rt_rounding)
+    if args_dict.mz_rounding == 0:
+        mz_bin = int(args_dict.mz_bin)
+    else:
+        mz_bin = np.round(float(args_dict.mz_bin), args_dict.mz_rounding)
+    # Make all matrices of equal shapes so they can be concatenated
+    matrices = []
+    new_labels = []
+    for matrix, label in zip([x[0] for x in data_matrix], labels):
+        if max_rt - matrix.shape[1] > 0:
+            matrix = np.concatenate(
+                (matrix, np.zeros((max_min_mz_parent, int((max_rt - matrix.shape[1])), matrix.shape[2]))), 1)
+        if max_mz - matrix.shape[2] > 0:
+            matrix = np.concatenate(
+                (matrix, np.zeros((max_min_mz_parent, matrix.shape[1], int((max_mz - matrix.shape[2]))))), 2)
+        matrices += [matrix.reshape(-1)]
+        new_labels += [label]
+    pool.close()
+    pool.join()
+    if rt_stride:
+        rt_stride = rt_bin / 2
+    else:
+        rt_stride = 0
+    if mz_stride:
+        mz_stride = mz_bin / 2
+    else:
+        mz_stride = 0
+
+    mzs = [np.round(mz * mz_bin, args_dict.mz_rounding) - mz_stride for mz in range(max_mz)]
+    rts = [np.round(rt * rt_bin, args_dict.rt_rounding) - rt_stride for rt in range(max_rt)]
+
+    return pd.DataFrame(
+        data=np.stack(matrices),
+        index=new_labels,
+        columns=[f"{mz_min_parent}_{rt}_{mz}" for mz_min_parent in mz_min_parents for rt in rts for mz in mzs]
+    ).fillna(0)
+
+
+def get_plates(path, labels, blk_plate=1):
+    infos = pd.read_csv(path, index_col=0)
+    infos.index = [x.lower() for x in infos.index]
+    plates = []
+    # [np.where(infos.index == label.split('_')[1])[0][0] for label in labels]
+    for label in labels:
+        if 'pool' in label:
+            plates += [1]
+        elif 'blk' not in label:
+            plates += [infos['Plate'][np.where(infos.index == label.split('_')[1])[0][0]]]
+        else:
+            if 'blk_p' not in label:
+                plates += [blk_plate]
+            else:
+                plate = int(label.split('_')[2].split('p')[1].split('-')[0])
+                plates += [plate]
+    return plates
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description='')
+    parser.add_argument("--test_run", type=int, default=0,
+                        help="Is it a test run? 1 for true 0 for false")
+    parser.add_argument("--n_samples", type=int, default=-1,
+                        help="How many samples to run? Only modify to make test runs faster (-1 for all samples)")
+    parser.add_argument("--log2", type=str, default='inloop',
+                        help='log the data in the loop, after the loop or not log the data. Choices: [inloop, after, no]')
+    parser.add_argument("--stride", type=int, default=0, help='Shift the data matrix')
+    parser.add_argument("--binary", type=int, default=0, help='Blanks vs bacteria')
+    parser.add_argument("--threshold", type=float, default=0.1)
+    # parser.add_argument("--mz_rounding", type=int, default=1)
+    # parser.add_argument("--rt_rounding", type=int, default=1)
+    parser.add_argument("--mz_bin_post", type=int, default=0.2)
+    parser.add_argument("--rt_bin_post", type=int, default=20)
+    parser.add_argument("--mz_bin", type=int, default=0.01)
+    parser.add_argument("--rt_bin", type=int, default=0.1)
+    parser.add_argument("--run_name", type=str, default="eco,sag,efa,kpn,blk,pool")
+    parser.add_argument("--scaler", type=str, default="none")
+    parser.add_argument("--combat_corr", type=int, default=0)
+    parser.add_argument("--k", type=str, default=-1, help="Number of features to keep")
+    parser.add_argument("--save", type=int, default=0, help="Save images and csvs?")
+    parser.add_argument("--resources_path", type=str, default='../../../../resources',
+                        help="Path to input directory")
+    parser.add_argument("--feature_selection", type=str, default='mutual_info_classif',
+                        help="Mutual Information classification cutoff")
+    parser.add_argument("--feature_selection_threshold", type=float, default=0.,
+                        help="Mutual Information classification cutoff")
+    parser.add_argument("--spd", type=str, default="200")
+    args = parser.parse_args()
+
+    if args.mz_bin_post < 1:
+        args.mz_rounding = len(str(args.mz_bin_post).split('.')[-1]) + 1
+    else:
+        args.mz_rounding = 1
+
+    if args.rt_bin_post < 1:
+        args.rt_rounding = len(str(args.rt_bin_post).split('.')[-1]) + 1
+    else:
+        args.rt_rounding = 1
+
+    out_dest = f"{args.resources_path}/matrices"
+    input_dir = f"{args.resources_path}/tsv"
+
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    dir_name = f"{script_dir}/{out_dest}/mz{args.mz_bin_post}/rt{args.rt_bin_post}/{args.spd}spd/" \
+               f"combat{args.combat_corr}/stride{args.stride}/{args.scaler}/log{args.log2}/{args.feature_selection}/train/"
+    dir_input = f"{script_dir}/{input_dir}/mz{args.mz_bin}/rt{args.rt_bin}/{args.spd}spd/train/"
+    valid_dir_name = f"{script_dir}/{out_dest}/mz{args.mz_bin_post}/rt{args.rt_bin_post}/{args.spd}spd/" \
+                     f"combat{args.combat_corr}/stride{args.stride}/{args.scaler}/log{args.log2}/{args.feature_selection}/valid/"
+    valid_dir_input = f"{script_dir}/{input_dir}/mz{args.mz_bin}/rt{args.rt_bin}/{args.spd}spd/valid/"
+    test_dir_name = f"{script_dir}/{out_dest}/mz{args.mz_bin_post}/rt{args.rt_bin_post}/{args.spd}spd/" \
+                    f"combat{args.combat_corr}/stride{args.stride}/{args.scaler}/log{args.log2}/{args.feature_selection}/test/"
+    test_dir_input = f"{script_dir}/{input_dir}/mz{args.mz_bin}/rt{args.rt_bin}/{args.spd}spd/test/"
+
+    bacteria_to_keep = None
+    if 'plate' in args.run_name:
+        plates_df = pd.read_csv(f'{script_dir}/{args.resources_path}/RD150_SamplePrep_Juillet_Samples.csv', index_col=0)
+        # set in case pool or blk are already in the plate
+        plate = int(args.run_name.split('_')[1])
+        blk = 'blk' if plate == 1 else 'blk_p' + str(plate)
+        bacteria_to_keep = list(
+            set([bact.lower() for x, bact in zip(plates_df['Plate'], plates_df.index) if x == plate] + [blk, 'pool']))
+        print(f'Plate #{plate} selected. Bacteria kept:{bacteria_to_keep}')
+    elif len(args.run_name.split(',')) > 1:
+        bacteria_to_keep = args.run_name.split(',')
+    else:
+        print('No plate specified, using them all')
+        bacteria_to_keep = None
+
+    data_matrix = concat_and_transpose(dir_input, dir_name, mz_stride=False, rt_stride=False, args_dict=args,
+                                       names_to_keep=bacteria_to_keep)
+    if args.stride:
+        data_matrix2 = concat_and_transpose(dir_input, dir_name, mz_stride=True, rt_stride=False, args_dict=args,
+                                            names_to_keep=bacteria_to_keep)
+        data_matrix3 = concat_and_transpose(dir_input, dir_name, mz_stride=False, rt_stride=True, args_dict=args,
+                                            names_to_keep=bacteria_to_keep)
+        data_matrix4 = concat_and_transpose(dir_input, dir_name, mz_stride=True, rt_stride=True, args_dict=args,
+                                            names_to_keep=bacteria_to_keep)
+        data_matrix = pd.concat((data_matrix, data_matrix2, data_matrix3, data_matrix4), 1)
+    # data_matrix.to_csv('')
+    # data_matrix = data_matrix.view(data_matrix.shape[0], -1)
+    if args.test_run:
+        args.run_name = 'test'
+    print('\nComplete data shape', data_matrix.shape)
+
+    # Removes all the columns that are only zeros. Runs in parallel (only with 10% of the cpus)
+    print("Finding not zeros columns...")
+    if not args.test_run:
+        # DataFrame is split into smaller dataframes to enable parallel processing
+        dframe_list = split_df(data_matrix, cols_per_split=int(1e5))
+    else:
+        dframe_list = split_df(data_matrix.iloc[:, :1000], cols_per_split=int(1e2))
+
+    n_cpus = multiprocessing.cpu_count() - 1
+    if n_cpus > len(dframe_list):
+        n_cpus = len(dframe_list)
+    pool = multiprocessing.Pool(int(n_cpus))
+
+    fun = MultiKeepNotFunctions(keep_only_not_zeros, dframe_list, threshold=0,
+                                n_processes=np.ceil(data_matrix.shape[1] / int(1e5)))
+    data_matrix = pool.map(fun.process, range(len(dframe_list)))
+    data_matrix, not_zeros_col = pd.concat([x[0] for x in data_matrix], 1), np.array(
+        [x for x in np.concatenate([x[1] for x in data_matrix])])
+    pool.close()
+    pool.join()
+
+    print("Finding not zeros columns...")
+    dframe_list = split_df(data_matrix, cols_per_split=int(1e4))
+    n_cpus = multiprocessing.cpu_count() - 1
+    if n_cpus > len(dframe_list):
+        n_cpus = len(dframe_list)
+    pool = multiprocessing.Pool(int(n_cpus))
+    fun = MultiKeepNotFunctions(keep_not_zeros, dframe_list, threshold=args.threshold,
+                                n_processes=np.ceil(data_matrix.shape[1] / int(1e4)))
+    data_matrix = pool.map(fun.process, range(len(dframe_list)))
+    data_matrix, not_zeros_col = pd.concat([x[0] for x in data_matrix], 1), np.array(
+        [x for x in np.concatenate([x[1] for x in data_matrix])])
+    pool.close()
+    pool.join()
+
+    # not_zeros_col = np.unique(np.concatenate((not_zeros_columns, not_zeros_columns2)))
+    labels = data_matrix.index
+    columns = data_matrix.columns
+    if args.log2 == 'after':
+        print("Logging the data...")
+        data_matrix = np.log1p(data_matrix)  # .astype(np.float32)
+    if args.scaler in ['robust', 'standard', 'minmax']:
+        if args.scaler == 'robust':
+            print('Robust Standardization...')
+            scaler = RobustScaler()
+        elif args.scaler == 'standard':
+            print('Standardization...')
+            scaler = StandardScaler()
+        elif args.scaler == 'minmax':
+            print('Normalization...')
+            scaler = MinMaxScaler()
+        else:
+            exit("Scaler not in ['robust', 'standard', 'minmax']")
+        labels = data_matrix.index
+        columns = data_matrix.columns
+        data_matrix = scaler.fit_transform(data_matrix)
+        dump(scaler, open(f'{dir_name}/standard_scaler.pkl', 'wb'))
+    elif args.scaler == 'none':
+        print('No Normalization.')
+    else:
+        print('Scaler must be one of robust, standard, minmax or none')
+
+    data_matrix = pd.DataFrame(data_matrix, index=labels, columns=columns)
+    labels = data_matrix.index
+    lows = []
+    cats = []
+    batches = []
+    pool_indices = {'indices': [], 'names': []}
+    for i, sample_name in enumerate(labels):
+        # fname = file.split('\\')[-1]
+        cat = sample_name.split('_')[1]
+        batch = sample_name.split('_')[0]
+        cats += [cat]
+        batches += [batch]
+        if 'pool' in sample_name:
+            pool_indices['indices'] += [i]
+            pool_indices['names'] += [labels[i]]
+            lows += [0]
+        elif 'l' in cat and 'blk' not in sample_name:
+            lows += [1]
+        else:
+            lows += [0]
+
+    plates = get_plates(f'{script_dir}/{args.resources_path}/RD150_SamplePrep_Juillet_Samples.csv', labels, blk_plate=1)
+    pool_data = data_matrix.iloc[pool_indices['indices']]
+    pool_batches = np.array(batches)[pool_indices['indices']].tolist()
+    pool_labels = np.array(labels)[pool_indices['indices']].tolist()
+    pool_plates = np.array(plates)[pool_indices['indices']].tolist()
+
+    train_data = data_matrix.drop(pool_indices['names'])
+    cats = np.delete(np.array(cats), pool_indices['indices']).tolist()
+    labels = np.delete(np.array(labels), pool_indices['indices']).tolist()
+    plates = np.delete(np.array(plates), pool_indices['indices']).tolist()
+    lows = np.delete(np.array(lows), pool_indices['indices']).tolist()
+    batches = np.delete(np.array(batches), pool_indices['indices']).tolist()
+
+    _ = count_array(cats)
+    cats = np.array(cats)
+
+    final = {
+        'train': train_data.copy(),
+        'test': None,
+        'valid': None,
+        'pool': pool_data.copy()
+    }
+
+    cats = {
+        'train': cats,
+        'valid': None,
+        'test': None
+    }
+
+    print("\n\nValidations\n\n")
+
+    # The blks in tests are all in the same plate
+
+    # TODO Make a function so it is not as redundant for the valid and test set
+    if bacteria_to_keep is not None:
+        bacteria_to_keep = [x if 'blk' not in x else 'blk' for x in bacteria_to_keep]
+    valid_data_matrix = concat_and_transpose(valid_dir_input, valid_dir_name, mz_stride=False, rt_stride=False,
+                                             args_dict=args, names_to_keep=bacteria_to_keep,
+                                             features=data_matrix.columns)
+    if args.stride:
+        valid_data_matrix2 = concat_and_transpose(valid_dir_input, valid_dir_name, mz_stride=True, rt_stride=False,
+                                                  args_dict=args, names_to_keep=bacteria_to_keep,
+                                                  features=data_matrix.columns)
+        valid_data_matrix3 = concat_and_transpose(valid_dir_input, valid_dir_name, mz_stride=False, rt_stride=True,
+                                                  args_dict=args, names_to_keep=bacteria_to_keep,
+                                                  features=data_matrix.columns)
+        valid_data_matrix4 = concat_and_transpose(valid_dir_input, valid_dir_name, mz_stride=True, rt_stride=True,
+                                                  args_dict=args, names_to_keep=bacteria_to_keep,
+                                                  features=data_matrix.columns)
+        valid_data_matrix = pd.concat((valid_data_matrix, valid_data_matrix2, valid_data_matrix3, valid_data_matrix4),
+                                      1)
+
+    print('\nComplete valid data shape', valid_data_matrix.shape)
+
+    cols = [True if x in valid_data_matrix.columns else False for i, x in enumerate(not_zeros_col)]
+    valid_data_matrix = valid_data_matrix[not_zeros_col[cols]]
+    data_matrix = data_matrix[not_zeros_col[cols]]
+
+    print('Standardization...')
+    valid_labels = valid_data_matrix.index
+    columns = valid_data_matrix.columns
+    if args.log2 == 'after':
+        valid_data_matrix = np.log1p(valid_data_matrix)  # .astype(np.float32)
+    if args.scaler != 'none':
+        valid_data_matrix = scaler.transform(valid_data_matrix)
+
+    print("Logging the data...")
+    valid_data_matrix = pd.DataFrame(valid_data_matrix, index=valid_labels, columns=columns)
+    valid_labels = valid_data_matrix.index
+    valid_lows = []
+    valid_cats = []
+    valid_batches = []
+    valid_pool_indices = {'indices': [], 'names': []}
+    for i, sample_name in enumerate(valid_labels):
+        # fname = file.split('\\')[-1]
+        cat = sample_name.split('_')[1]
+        batch = sample_name.split('_')[0]
+
+        valid_cats += [cat]
+        valid_batches += [0]
+        # valid_batches += [batch]
+        if 'pool' in sample_name:
+            valid_pool_indices['indices'] += [i]
+            valid_pool_indices['names'] += [valid_labels[i]]
+            valid_lows += [0]
+        elif 'l' in cat and 'blk' not in sample_name:
+            valid_lows += [1]
+        else:
+            valid_lows += [0]
+
+    valid_plates = get_plates(f'{script_dir}/{args.resources_path}/RD150_SamplePrep_Novembre_Samples.csv', valid_labels, blk_plate=8)
+    valid_pool_plates = np.array(valid_plates)[valid_pool_indices['indices']].tolist()
+    valid_pool_data = valid_data_matrix.iloc[valid_pool_indices['indices']]
+    valid_pool_batches = np.array(valid_batches)[valid_pool_indices['indices']].tolist()
+
+    valid_final = valid_data_matrix.drop(valid_pool_indices['names'])
+    valid_cats = np.delete(np.array(valid_cats), valid_pool_indices['indices']).tolist()
+    valid_labels = np.delete(np.array(valid_labels), valid_pool_indices['indices']).tolist()
+    valid_lows = np.delete(np.array(valid_lows), valid_pool_indices['indices']).tolist()
+    valid_batches = np.delete(np.array(valid_batches), valid_pool_indices['indices']).tolist()
+    valid_plates = np.delete(np.array(valid_plates), valid_pool_indices['indices']).tolist()
+
+    _ = count_array(valid_cats)
+
+    valid_cats = np.array(valid_cats)
+
+    valid_final.columns = final['train'].columns
+    valid_pool_data.columns = final['train'].columns
+    final['valid'] = valid_final.copy()
+    final['valid_pool'] = valid_pool_data.copy()
+
+    print("\n\nTests\n\n")
+
+    # The blks in tests are all in the same plate
+
+    # TODO Make a function so it is not as redundant for the valid and test set
+    if bacteria_to_keep is not None:
+        bacteria_to_keep = [x if 'blk' not in x else 'blk' for x in bacteria_to_keep]
+    test_data_matrix = concat_and_transpose(test_dir_input, test_dir_name, mz_stride=False, rt_stride=False,
+                                            args_dict=args, names_to_keep=bacteria_to_keep,
+                                            features=data_matrix.columns)
+    if args.stride:
+        test_data_matrix2 = concat_and_transpose(test_dir_input, test_dir_name, mz_stride=True, rt_stride=False,
+                                                 args_dict=args, names_to_keep=bacteria_to_keep,
+                                                 features=data_matrix.columns)
+        test_data_matrix3 = concat_and_transpose(test_dir_input, test_dir_name, mz_stride=False, rt_stride=True,
+                                                 args_dict=args, names_to_keep=bacteria_to_keep,
+                                                 features=data_matrix.columns)
+        test_data_matrix4 = concat_and_transpose(test_dir_input, test_dir_name, mz_stride=True, rt_stride=True,
+                                                 args_dict=args, names_to_keep=bacteria_to_keep,
+                                                 features=data_matrix.columns)
+        test_data_matrix = pd.concat((test_data_matrix, test_data_matrix2, test_data_matrix3, test_data_matrix4), 1)
+
+    print('\nComplete test data shape', test_data_matrix.shape)
+
+    cols = [True if x in test_data_matrix.columns else False for i, x in enumerate(not_zeros_col)]
+    test_data_matrix = test_data_matrix[not_zeros_col[cols]]
+    data_matrix = data_matrix[not_zeros_col[cols]]
+
+    print('Standardization...')
+    test_labels = test_data_matrix.index
+    columns = test_data_matrix.columns
+    if args.log2 == 'after':
+        test_data_matrix = np.log1p(test_data_matrix)  # .astype(np.float32)
+    if args.scaler != 'none':
+        test_data_matrix = scaler.transform(test_data_matrix)
+
+    print("Logging the data...")
+    test_data_matrix = pd.DataFrame(test_data_matrix, index=test_labels, columns=columns)
+    test_labels = test_data_matrix.index
+    test_lows = []
+    test_cats = []
+    test_batches = []
+    test_pool_indices = {'indices': [], 'names': []}
+    for i, sample_name in enumerate(test_labels):
+        # fname = file.split('\\')[-1]
+        cat = sample_name.split('_')[1]
+        batch = sample_name.split('_')[0]
+
+        test_cats += [cat]
+        test_batches += [0]
+        # test_batches += [batch]
+        if 'pool' in sample_name:
+            test_pool_indices['indices'] += [i]
+            test_pool_indices['names'] += [test_labels[i]]
+            test_lows += [0]
+        elif 'l' in cat and 'blk' not in sample_name:
+            test_lows += [1]
+        else:
+            test_lows += [0]
+
+    test_plates = get_plates(f'{script_dir}/{args.resources_path}/RD150_SamplePrep_Novembre_Samples.csv', test_labels, blk_plate=8)
+    test_pool_plates = np.array(test_plates)[test_pool_indices['indices']].tolist()
+    test_pool_data = test_data_matrix.iloc[test_pool_indices['indices']]
+    test_pool_batches = np.array(test_batches)[test_pool_indices['indices']].tolist()
+
+    test_final = test_data_matrix.drop(test_pool_indices['names'])
+    test_cats = np.delete(np.array(test_cats), test_pool_indices['indices']).tolist()
+    test_labels = np.delete(np.array(test_labels), test_pool_indices['indices']).tolist()
+    test_lows = np.delete(np.array(test_lows), test_pool_indices['indices']).tolist()
+    test_batches = np.delete(np.array(test_batches), test_pool_indices['indices']).tolist()
+    test_plates = np.delete(np.array(test_plates), test_pool_indices['indices']).tolist()
+
+    _ = count_array(test_cats)
+
+    test_cats = np.array(test_cats)
+
+    test_final.columns = final['train'].columns
+    test_pool_data.columns = final['train'].columns
+    final['test'] = test_final.copy()
+    final['test_pool'] = test_pool_data.copy()
+
+    print('\nComplete data shape', final['train'].shape)
+    print('\nComplete valid data shape', final['valid'].shape)
+    print('\nComplete test data shape', final['test'].shape)
+
+    if args.combat_corr:
+        from combat.pycombat import pycombat
+
+        df = pd.concat((final['train'], final['pool'], final['valid'], final['valid_pool'], final['test'], final['test_pool']), 0)
+        all_batches = np.concatenate((batches, pool_batches, valid_batches, valid_pool_batches, test_batches, test_pool_batches), 0)
+        all_plates = np.concatenate((plates, pool_plates, valid_plates, valid_pool_plates, test_plates, test_pool_plates), 0)
+        df = df.fillna(0)
+        print("Combat Correction!")
+
+        print('Number of Nans:', df.isna().sum().sum())
+        df2 = pycombat(df.T, all_plates)  # ref batch is not working here... but it should work
+
+        # data = standard_minmax_scaler.fit_transform(df2.values.T)
+        data = df2.values.T
+
+        final['train'] = pd.DataFrame(data[:final['train'].shape[0]], index=final['train'].index, columns=df.columns)
+        final['pool'] = pd.DataFrame(data[final['train'].shape[0]:final['train'].shape[0] + final['pool'].shape[0]],
+                                     index=final['pool'].index, columns=df.columns)
+        final['valid'] = pd.DataFrame(data[final['train'].shape[0] + final['pool'].shape[0]:final['train'].shape[0] +
+                                                                                           final['pool'].shape[0] +
+                                                                                           final['valid'].shape[0]],
+                                     index=final['valid'].index, columns=df.columns)
+        final['valid_pool'] = pd.DataFrame(
+            data[final['train'].shape[0] + final['pool'].shape[0] + final['valid'].shape[0]:final['train'].shape[0] + final['pool'].shape[0] + final['valid'].shape[0] + final['valid_pool'].shape[0]],
+            index=final['valid_pool'].index, columns=df.columns)
+        final['test'] = pd.DataFrame(data[final['train'].shape[0] + final['pool'].shape[0] + final['valid'].shape[0] + final['valid_pool'].shape[0]:final['train'].shape[0] +
+                                                                                           final['pool'].shape[0] + final['valid'].shape[0] + final['valid_pool'].shape[0] +
+                                                                                           final['test'].shape[0]],
+                                     index=final['test'].index, columns=df.columns)
+        final['test_pool'] = pd.DataFrame(
+            data[final['train'].shape[0] + final['pool'].shape[0] + final['valid'].shape[0] + final['valid_pool'].shape[0] + final['test'].shape[0]:],
+            index=final['test_pool'].index, columns=df.columns)
+        print(
+            f"data: {data.shape}, final train: {data[:final['train'].shape[0]].shape}, index: {len(final['train'].index)}, columns: {len(final['train'].columns)}")
+
+    fs = get_feature_selection_method(args.feature_selection)
+
+    print(f"Calculating {args.feature_selection}\n")
+    process_data(final, cats, model=fs, cutoff=args.feature_selection_threshold,
+                 dirname=dir_name, k=int(args.k), binary=args.binary, run_name=args.run_name,
+                 combat_corr=args.combat_corr)
+
+    args.mutual_info_path = f'../../resources/matrices/mz{args.mz_bin_post}/rt{args.rt_bin_post}/' \
+                            f'{args.spd}spd/combat{args.combat_corr}/stride{args.stride}/' \
+                            f'{args.scaler}/log{args.log2}/{args.feature_selection}/train/{args.run_name}/' \
+                            f'{args.feature_selection}_scores_binary{args.binary}_gt{args.feature_selection_threshold}_{args.run_name}.csv'
+    if args.k > -1:
+        features = pd.read_csv(args.mutual_info_path)['minp_maxp_rt_mz'].to_numpy()[:args.k]
+    else:
+        features = pd.read_csv(args.mutual_info_path)['minp_maxp_rt_mz'].to_numpy()
+
+    # The uncombatted values are also saved
+    test_final = test_final[features]
+    test_pool_data = test_pool_data[features]
+    valid_final = valid_final[features]
+    valid_pool_data = valid_pool_data[features]
+    train_data = train_data[features]
+    pool_data = pool_data[features]
+    final['valid'] = final['valid'][features]
+    final['valid_pool'] = final['valid_pool'][features]
+    final['test'] = final['test'][features]
+    final['test_pool'] = final['test_pool'][features]
+
+    # Round values to 2 decimals
+    final['test'].iloc[:] = np.round(np.nan_to_num(final['test']), 2)
+    final['test_pool'].iloc[:] = np.round(np.nan_to_num(final['test_pool']), 2)
+    final['valid'].iloc[:] = np.round(np.nan_to_num(final['valid']), 2)
+    final['valid_pool'].iloc[:] = np.round(np.nan_to_num(final['valid_pool']), 2)
+    valid_final.iloc[:] = np.round(np.nan_to_num(valid_final), 2)
+    valid_pool_data.iloc[:] = np.round(np.nan_to_num(valid_pool_data), 2)
+    test_final.iloc[:] = np.round(np.nan_to_num(test_final), 2)
+    test_pool_data.iloc[:] = np.round(np.nan_to_num(test_pool_data), 2)
+    train_data.iloc[:] = np.round(np.nan_to_num(train_data), 2)
+    pool_data.iloc[:] = np.round(np.nan_to_num(pool_data), 2)
+
+    os.makedirs(f'{test_dir_name}/{args.run_name}', exist_ok=True)
+    os.makedirs(f'{valid_dir_name}/{args.run_name}', exist_ok=True)
+    if args.binary:
+        label = 'BLK'
+    else:
+        label = 'BACT'
+
+    if args.combat_corr:
+        final['test'].to_csv(
+            f'{test_dir_name}/{args.run_name}/{label}_inference_inputs_{args.run_name}_combat.csv',
+            index=True, index_label='ID')
+        final['test_pool'].to_csv(
+            f'{test_dir_name}/{args.run_name}/{label}_inference_pool_inputs_{args.run_name}_combat.csv',
+            index=True, index_label='ID')
+        final['valid'].to_csv(
+            f'{valid_dir_name}/{args.run_name}/{label}_valid_inputs_{args.run_name}_combat.csv',
+            index=True, index_label='ID')
+        final['valid_pool'].to_csv(
+            f'{valid_dir_name}/{args.run_name}/{label}_valid_pool_inputs_{args.run_name}_combat.csv',
+            index=True, index_label='ID')
+        test_final.to_csv(
+            f'{test_dir_name}/{args.run_name}/{label}_inference_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+        test_pool_data.to_csv(
+            f'{test_dir_name}/{args.run_name}/{label}_inference_pool_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+        valid_final.to_csv(
+            f'{valid_dir_name}/{args.run_name}/{label}_valid_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+        valid_pool_data.to_csv(
+            f'{valid_dir_name}/{args.run_name}/{label}_valid_pool_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+
+        train_data.to_csv(
+            f'{dir_name}/{args.run_name}/{label}_train_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+        pool_data.to_csv(
+            f'{dir_name}/{args.run_name}/{label}_pool_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+    else:
+        final['test'].to_csv(
+            f'{test_dir_name}/{args.run_name}/{label}_inference_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+        final['test_pool'].to_csv(
+            f'{test_dir_name}/{args.run_name}/{label}_inference_pool_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+        final['valid'].to_csv(
+            f'{valid_dir_name}/{args.run_name}/{label}_valid_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+        final['valid_pool'].to_csv(
+            f'{valid_dir_name}/{args.run_name}/{label}_valid_pool_inputs_{args.run_name}.csv',
+            index=True, index_label='ID')
+
+    print('Duration: {}'.format(datetime.now() - start_time))

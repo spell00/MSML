@@ -1,0 +1,37 @@
+numpy
+scikit_learn==1.1.1
+pandas~=1.1.5
+scikit-optimize==0.9.0
+pytest
+pytest-cov
+pylint
+pytest-pylint
+sklearn
+matplotlib~=3.3.3
+seaborn~=0.11.1
+tabulate~=0.8.9
+scipy~=1.6.3
+tqdm~=4.56.0
+joblib~=1.0.0
+sunbird~=0.0.4
+combat
+pycombat
+PTable
+torch
+torchvision
+tensorboardX
+ax-platform
+psutil
+scikit-image
+nibabel
+mpmath
+patsy
+umap-learn
+shapely
+
+# R packages:
+# install.packages("harmony")
+# install.packages("sva")
+# install.packages("sva")
+# BiocManager::install("zinbwave")
+# install.packages("factor")
