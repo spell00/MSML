@@ -714,8 +714,8 @@ if __name__ == "__main__":
     parser.add_argument('--tied_weights', type=int, default=1)
     parser.add_argument('--variational', type=int, default=0)
     parser.add_argument('--zinb', type=int, default=0)
-    parser.add_argument('--use_valid', type=int, default=0)
-    parser.add_argument('--use_test', type=int, default=0)
+    parser.add_argument('--use_valid', type=int, default=0, help='Use if valid data is in a seperate file')
+    parser.add_argument('--use_test', type=int, default=0, help='Use if valid data is in a seperate file')
 
     # These arguments are not used by the Train class
     parser.add_argument('--path', type=str, default='../../resources/')
