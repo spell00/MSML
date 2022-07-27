@@ -1,11 +1,10 @@
-import math
 import torch
 from torch import nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.autograd import Function
-from msml.dl.utils.stochastic import GaussianSample
-from msml.dl.utils.distributions import log_normal_standard, log_normal_diag, log_gaussian
+from msml.dl.models.pytorch.utils.stochastic import GaussianSample
+from msml.dl.models.pytorch.utils.distributions import log_normal_standard, log_normal_diag, log_gaussian
 
 
 # https://github.com/DHUDBlab/scDSC/blob/1247a63aac17bdfb9cd833e3dbe175c4c92c26be/layers.py#L43

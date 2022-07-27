@@ -1,12 +1,10 @@
-import os
-
 # os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 # CUDA_VISIBLE_DEVICES = ""
 
 from tensorboard.plugins.hparams import api as hp
 import tensorflow as tf
 from sklearn.metrics import silhouette_score, adjusted_rand_score, adjusted_mutual_info_score
-from msml.dl.utils.metrics import rKBET, rLISI
+from msml.dl.models.pytorch.utils.metrics import rKBET, rLISI
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -21,8 +19,8 @@ from matplotlib.lines import Line2D
 from msml.dl.models.pytorch.utils.plotting import confidence_ellipse
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.neighbors import KNeighborsClassifier
-from msml.dl.utils.metrics import batch_f1_score
-from msml.dl.utils.utils import log_confusion_matrix, save_roc_curve, save_precision_recall_curve
+from msml.dl.models.pytorch.utils.metrics import batch_f1_score
+from msml.dl.models.pytorch.utils.utils import log_confusion_matrix, save_roc_curve, save_precision_recall_curve
 import seaborn as sns
 from sklearn.decomposition import PCA
 from sklearn.cross_decomposition import CCA

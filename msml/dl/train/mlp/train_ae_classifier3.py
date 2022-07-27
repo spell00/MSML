@@ -19,14 +19,12 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 from sklearn.model_selection import StratifiedKFold
 
 from msml.utils.batch_effect_removal import remove_batch_effect, get_berm
-from msml.dl.models.pytorch.aedann import AutoEncoder, to_categorical, ReverseLayerF
-from msml.dl.models.pytorch.utils.loggings import TensorboardLoggingAE, log_stuff, \
-    log_input_ordination
-from msml.dl.models.pytorch.utils.utils import get_optimizer
+from msml.dl.models.pytorch.aedann import AutoEncoder, ReverseLayerF
+from msml.dl.models.pytorch.utils.loggings import TensorboardLoggingAE, log_stuff, log_input_ordination
 from msml.dl.models.pytorch.utils.dataset import get_loaders
 from msml.utils.utils import scale_data, get_unique_labels
-from msml.dl.utils.utils import get_best_values_from_tb, get_best_values, get_empty_traces, log_traces, \
-    get_empty_dicts, add_to_logger
+from msml.dl.models.pytorch.utils.utils import get_optimizer, to_categorical, get_empty_dicts, get_empty_traces, \
+    log_traces, get_best_values_from_tb, get_best_values, add_to_logger
 
 import warnings
 
