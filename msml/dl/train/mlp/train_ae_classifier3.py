@@ -577,6 +577,7 @@ class Train:
         )
         subcategories = np.array([x for x in subcategories if x != ''])
         self.subcategories = subcategories
+
         for key in list(data.keys()):
             if key == 'inputs':
                 data[key]['all'] = pd.concat((data[key]['train'], data[key]['valid'], data[key]['test']), 0)

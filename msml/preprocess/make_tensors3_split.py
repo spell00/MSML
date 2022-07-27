@@ -1007,5 +1007,4 @@ if __name__ == "__main__":
         final['valid_pool'].to_csv(
             f'{dir_name}/{args.run_name}/valid_pool_inputs.csv',
             index=True, index_label='ID')
-
     print('Duration: {}'.format(datetime.now() - start_time))
