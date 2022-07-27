@@ -2,7 +2,6 @@
 ## Authors
 
 * Simon Pelletier (2021-) (Current Maintainer)
-* Elsa CLAUDE (@elsa) (2020)
 
 # Prerequisites on ubuntu
 apt-get install -y parallel
