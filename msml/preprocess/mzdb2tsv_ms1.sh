@@ -4,6 +4,7 @@ mz_bin="$1"
 rt_bin="$2"
 spd="$3"
 experiment="$4"
+# group="$5"
 if [ $# -ge 1 ]
 then
     if [ "$6" == "test" ]
@@ -22,15 +23,15 @@ fi
 cd msml/mzdb2tsv || exit
 nprocs=$(nproc --all)
 echo "Processing mzdb to tsv using $nprocs processes"
-find ../../../../resources/"$experiment"/mzdb/"$spd"spd/* | parallel -j "$nprocs" JAVA_OPTS="-Djava.library.path=./" ./amm dia_maps_histogram.sc {} "$mz_bin" "$rt_bin"';' echo "Processing " {}
+find ../../../../resources/"$experiment"/mzdb/"$spd"spd/* | parallel -j "$nprocs" JAVA_OPTS="-Djava.library.path=./" ./amm dia_maps_histogram_ms1.sc {} "$mz_bin" "$rt_bin"';' echo "Processing " {}
 wait
 # cd ../../../../resources/mzdb/"$spd"spd/"$group" || exit
-mkdir -p "../../../../resources/tsv/"$experiment"/mz$mz_bin/rt$rt_bin/"$spd"spd/"
+mkdir -p "../../../../resources/"$experiment"/tsv/mz$mz_bin/rt$rt_bin/"$spd"spd/"
 for input in *.tsv
 do
     id="${input%.*}"
     echo "Moving $id data"
-    mv "$id.tsv" "../../../../resources/tsv/"$experiment"/mz$mz_bin/rt$rt_bin/"$spd"spd/"
+    mv "$id.tsv" "../../../../resources/"$experiment"/tsv/mz$mz_bin/rt$rt_bin/"$spd"spd/"
 done
 
 # cd ../../../../.. || exit

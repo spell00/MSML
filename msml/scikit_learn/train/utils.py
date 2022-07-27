@@ -6,7 +6,8 @@ Created on Fri May 28 2021
 """
 
 import numpy as np
-from msml.scikit_learn.utils import load_data, get_unique_labels
+from msml.scikit_learn.utils import load_data
+from msml.utils.utils import get_unique_labels
 
 
 def lows_train_to_test(variables):

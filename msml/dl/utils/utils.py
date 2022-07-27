@@ -56,31 +56,6 @@ def to_categorical(y, num_classes, dtype=torch.int):
     return torch.eye(num_classes, dtype=dtype)[y]
 
 
-"""
-def get_samples_names(labels):
-    samples = {s: [] for s in np.unique(labels['label'])}
-
-    new_keys = []
-    categories = []
-    nums = []
-    for i, label in enumerate(samples.keys()):
-        tmp = label.split('-')
-        lab = tmp[0].split('c..')[1]
-        num = tmp[1]
-        cat = 0
-        if lab != 'Normal':
-            cat = 1
-            lab = 'Not Normal'
-        new_keys += [f'{lab}-{num}']
-        categories += [cat]
-        if num not in nums:
-            nums += [int(num)]
-    # samples = dict(zip(new_keys, list(samples.values())))
-
-    return categories, nums
-"""
-
-
 def split_labels_indices(labels, train_inds):
     train_indices = []
     test_indices = []
@@ -124,7 +99,7 @@ def split_train_test(labels):
     return train_samples, test_samples, train_cats
 
 
-def getScalerFromString(scaler_str):
+def get_scaler_from_string(scaler_str):
     from sklearn.preprocessing import MinMaxScaler, RobustScaler, Normalizer, StandardScaler
     if str(scaler_str) == 'normalizer':
         scaler = Normalizer
@@ -379,9 +354,9 @@ def save_precision_recall_curve(model, x_test, y_test, unique_labels, name, bina
 
 def get_empty_dicts():
     values = {
-        "losses": [],
-        "domain_losses": [],
-        "domacc": [],
+        "rec_loss": [],
+        "dom_loss": [],
+        "dom_acc": [],
         "set_batch_metrics": {
             "lisi": {'inputs': {'domains': [], 'labels': [], 'set': []}, 'enc': {'domains': [], 'labels': [], 'set': []}, 'rec': {'domains': [], 'labels': [], 'set': []}},
             "silhouette": {'inputs': {'domains': [], 'labels': [], 'set': []}, 'enc': {'domains': [], 'labels': [], 'set': []}, 'rec': {'domains': [], 'labels': [], 'set': []}},
@@ -521,9 +496,9 @@ def get_empty_dicts():
         }
     }
     best_traces = {
-        'losses': [1000],
-        'dlosses': [1000],
-        'dacc': [0],
+        'rec_loss': [1000],
+        'dom_loss': [1000],
+        'dom_acc': [0],
         'train': {
             'closs': [100],
             'acc': [0],
@@ -562,7 +537,13 @@ def get_empty_dicts():
     return values, best_values, best_lists, best_traces
 
 
-def get_empty_traces():
+def get_empty_traces(subsets):
+    traces = {
+        'rec_loss': [],
+        'dom_loss': [0],
+        'dom_acc': [0],
+    }
+    lists = {}
     lists = {
         'train': {
             'set': [],
@@ -610,87 +591,46 @@ def get_empty_traces():
             'concs': {'l': [], 'h': [], 'v': []},
         }
     }
-    traces = {
-        'losses': [],
-        'dlosses': [0],
-        'dacc': [0],
-        'train': {
+    for g in ['train', 'valid', 'test']:
+        lists[g] = {
+            'set': [],
+            'preds': [],
+            'domain_preds': [],
+            'probs': [],
+            'lows': [],
+            'cats': [],
+            'classes': [],
+            'domains': [],
+            'labels': [],
+            'encoded_values': [],
+            'inputs': [],
+            'rec_values': [],
+            'concs': {s: [] for s in subsets},
+        }
+        traces[g] = {
             'closs': [],
             'acc': [],
-            'acc_l': [],
-            'acc_h': [],
-            'acc_v': [],
             'mcc': None,
-            'mcc_l': None,
-            'mcc_h': None,
-            'mcc_v': None,
-        },
-        'valid': {
-            'closs': [],
-            'acc': [],
-            'acc_l': [],
-            'acc_h': [],
-            'acc_v': [],
-            'mcc': None,
-            'mcc_l': None,
-            'mcc_h': None,
-            'mcc_v': None,
-        },
-        'test': {
-            'closs': [],
-            'acc': [],
-            'acc_l': [],
-            'acc_h': [],
-            'acc_v': [],
-            'mcc': None,
-            'mcc_l': None,
-            'mcc_h': None,
-            'mcc_v': None,
-        },
-    }
+        }
+        for s in subsets:
+            traces[g][f'acc_{s}'] = []
+            traces[g][f'mcc_{s}'] = []
+
     return lists, traces
 
 
-def log_traces(traces, values):
-    values['domain_losses'] += [np.mean(traces['dlosses'])]
-    values['domacc'] += [np.mean(traces['dacc'])]
-    values['losses'] += [np.mean(traces['losses'])]
+def log_traces(traces, values, subsets):
+    values['dom_loss'] += [np.mean(traces['dom_loss'])]
+    values['dom_acc'] += [np.mean(traces['dom_acc'])]
+    values['rec_loss'] += [np.mean(traces['rec_loss'])]
 
-    values['train']['closs'] += [np.mean(traces['train']['closs'])]
-    values['valid']['closs'] += [np.mean(traces['valid']['closs'])]
-    values['test']['closs'] += [np.mean(traces['test']['closs'])]
-
-    values['train']['acc'] += [np.mean(traces['train']['acc'])]
-    values['valid']['acc'] += [np.mean(traces['valid']['acc'])]
-    values['test']['acc'] += [np.mean(traces['test']['acc'])]
-
-    values['train']['acc_l'] += [np.mean(traces['train']['acc_l'])]
-    values['train']['acc_h'] += [np.mean(traces['train']['acc_h'])]
-    values['train']['acc_v'] += [np.mean(traces['train']['acc_v'])]
-
-    values['valid']['acc_l'] += [np.mean(traces['valid']['acc_l'])]
-    values['valid']['acc_h'] += [np.mean(traces['valid']['acc_h'])]
-    values['valid']['acc_v'] += [np.mean(traces['valid']['acc_v'])]
-
-    values['test']['acc_l'] += [np.mean(traces['test']['acc_l'])]
-    values['test']['acc_h'] += [np.mean(traces['test']['acc_h'])]
-    values['test']['acc_v'] += [np.mean(traces['test']['acc_v'])]
-
-    values['train']['mcc'] += [traces['train']['mcc']]
-    values['valid']['mcc'] += [traces['valid']['mcc']]
-    values['test']['mcc'] += [traces['test']['mcc']]
-
-    values['train']['mcc_l'] += [traces['train']['mcc_l']]
-    values['train']['mcc_h'] += [traces['train']['mcc_h']]
-    values['train']['mcc_v'] += [traces['train']['mcc_v']]
-
-    values['valid']['mcc_l'] += [traces['valid']['mcc_l']]
-    values['valid']['mcc_h'] += [traces['valid']['mcc_h']]
-    values['valid']['mcc_v'] += [traces['valid']['mcc_v']]
-
-    values['test']['mcc_l'] += [traces['test']['mcc_l']]
-    values['test']['mcc_h'] += [traces['test']['mcc_h']]
-    values['test']['mcc_v'] += [traces['test']['mcc_v']]
+    for g in list(traces.keys())[3:]:
+        values[g]['closs'] += [np.mean(traces[g]['closs'])]
+        values[g]['acc'] += [np.mean(traces[g]['acc'])]
+        values[g]['mcc'] += [traces[g]['mcc']]
+        for s in subsets:
+            values[g][f'acc_{s}'] += [np.mean(traces[g][f'acc_{s}'])]
+            values[g][f'mcc_{s}'] += [traces[g][f'mcc_{s}']]
 
     return values
 
@@ -707,12 +647,12 @@ def get_best_values_from_tb(event_acc):
     return best_closs
 
 
-def get_best_values(values, ae_only):
+def get_best_values(values, ae_only, subs):
     if ae_only:
         best_values = {
-            'rec_loss': np.mean(values['losses']),
-            'dom_loss': np.mean(values['dlosses']),
-            'dom_acc': np.mean(values['losses']),
+            'rec_loss': np.mean(values['rec_loss']),
+            'dom_loss': np.mean(values['dom_loss']),
+            'dom_acc': np.mean(values['dom_acc']),
             'train_loss': math.nan,
             'valid_loss': math.nan,
             'test_loss': math.nan,
@@ -744,45 +684,25 @@ def get_best_values(values, ae_only):
 
     else:
         best_values = {
-            'rec_loss': values['losses'][-1],
-            'dom_loss': values['domain_losses'][-1],
-            'dom_acc': values['domacc'][-1],
-            'train_loss': values['train']['closs'][-1],
-            'valid_loss': values['valid']['closs'][-1],
-            'test_loss': values['test']['closs'][-1],
-            'train_acc': values['train']['acc'][-1],
-            'valid_acc': values['valid']['acc'][-1],
-            'test_acc': values['test']['acc'][-1],
-            'train_acc_l': values['train']['acc_l'][-1],
-            'train_acc_h': values['train']['acc_h'][-1],
-            'train_acc_v': values['train']['acc_v'][-1],
-            'valid_acc_l': values['valid']['acc_l'][-1],
-            'valid_acc_h': values['valid']['acc_h'][-1],
-            'valid_acc_v': values['valid']['acc_v'][-1],
-            'test_acc_l': values['test']['acc_l'][-1],
-            'test_acc_h': values['test']['acc_h'][-1],
-            'test_acc_v': values['test']['acc_v'][-1],
-            'train_mcc': values['train']['mcc'][-1],
-            'valid_mcc': values['valid']['mcc'][-1],
-            'test_mcc': values['test']['mcc'][-1],
-            'train_mcc_l': values['train']['mcc_l'][-1],
-            'train_mcc_h': values['train']['mcc_h'][-1],
-            'train_mcc_v': values['train']['mcc_v'][-1],
-            'valid_mcc_l': values['valid']['mcc_l'][-1],
-            'valid_mcc_h': values['valid']['mcc_h'][-1],
-            'valid_mcc_v': values['valid']['mcc_v'][-1],
-            'test_mcc_l': values['test']['mcc_l'][-1],
-            'test_mcc_h': values['test']['mcc_h'][-1],
-            'test_mcc_v': values['test']['mcc_v'][-1],
+            'dom_loss': values['dom_loss'][-1],
+            'dom_acc': values['dom_acc'][-1],
+            'rec_loss': values['rec_loss'][-1],
         }
+        for g in ['train', 'valid', 'test']:
+            for k in ['acc', 'mcc']:
+                best_values[f'{g}_{k}'] = values[g][k][-1]
+                for sub in subs:
+                    best_values[f'{g}_{k}_{sub}'] = values[g][f'{k}_{sub}'][-1]
+                best_values[f'{g}_loss'] = values[g]['closs'][-1]
+
     return best_values
 
 
 def add_to_logger(values, logger, epoch):
-    if not np.isnan(values['losses'][-1]):
-        logger.add_scalar(f'rec_loss', values['losses'][-1], epoch)
-        logger.add_scalar(f'domain_losses', values['domain_losses'][-1], epoch)
-        logger.add_scalar(f'domacc', values['domacc'][-1], epoch)
+    if not np.isnan(values['rec_loss'][-1]):
+        logger.add_scalar(f'rec_loss', values['rec_loss'][-1], epoch)
+        logger.add_scalar(f'dom_loss', values['dom_loss'][-1], epoch)
+        logger.add_scalar(f'dom_acc', values['dom_acc'][-1], epoch)
     for group in list(values.keys())[4:]:
         logger.add_scalar(f'/closs/{group}', values[group]['closs'][-1], epoch)
         logger.add_scalar(f'/acc/{group}/all_concentrations', values[group]['acc'][-1], epoch)

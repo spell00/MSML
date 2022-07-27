@@ -1,41 +1,32 @@
-import pandas as pd
-import numpy as np
-
-from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler, Normalizer
 import matplotlib
-import seaborn as sns
 
 matplotlib.use('Agg')
 CUDA_VISIBLE_DEVICES = ""
-from umap import UMAP
 import matplotlib.pyplot as plt
-import math
+import pandas as pd
+import numpy as np
 import random
 import json
 import copy
 import torch
 from itertools import cycle
 from torch import nn
-import tensorflow as tf
-from torch.utils.data import DataLoader
-import torchvision
-from msml.scikit_learn.utils import get_unique_labels
 import os
-from msml.dl.models.pytorch.utils.loggings import TensorboardLoggingAE, log_metrics, log_ORD, log_TSNE, log_CCA
 from tensorboardX import SummaryWriter
-from sklearn.model_selection import StratifiedKFold
 from ax.service.managed_loop import optimize
 from sklearn.metrics import matthews_corrcoef as MCC
-from sklearn.decomposition import PCA
-from sklearn.cross_decomposition import CCA
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+from sklearn.model_selection import StratifiedKFold
 
-from msml.dl.models.pytorch.aedann import AutoEncoder, Classifier, to_categorical, ReverseLayerF
-from msml.dl.utils.dataset import MSDataset3
-from msml.utils.batch_effect_removal import comBatR, harmonyR
-from msml.dl.utils.utils import log_confusion_matrix, save_roc_curve, save_precision_recall_curve, \
-    get_best_values_from_tb, get_best_values, get_empty_traces, log_traces, get_empty_dicts, \
-    add_to_logger, count_labels
+from msml.utils.batch_effect_removal import remove_batch_effect, get_berm
+from msml.dl.models.pytorch.aedann import AutoEncoder, to_categorical, ReverseLayerF
+from msml.dl.models.pytorch.utils.loggings import TensorboardLoggingAE, log_stuff, \
+    log_input_ordination
+from msml.dl.models.pytorch.utils.utils import get_optimizer
+from msml.dl.models.pytorch.utils.dataset import get_loaders
+from msml.utils.utils import scale_data, get_unique_labels
+from msml.dl.utils.utils import get_best_values_from_tb, get_best_values, get_empty_traces, log_traces, \
+    get_empty_dicts, add_to_logger
 
 import warnings
 
@@ -46,580 +37,327 @@ torch.manual_seed(42)
 np.random.seed(42)
 
 
-def batch_f1_score(batch_score, class_score):
-    return 2 * (1 - batch_score) * (class_score) / (1 - batch_score + class_score)
-
-
-def get_optimizer(model, learning_rate, weight_decay, optimizer_type, momentum=0.9):
-    if optimizer_type == 'adam':
-        optimizer = torch.optim.Adam(params=model.parameters(),
-                                     lr=learning_rate,
-                                     weight_decay=weight_decay,
-                                     )
-    else:
-        optimizer = torch.optim.SGD(params=model.parameters(),
-                                    lr=learning_rate,
-                                    weight_decay=weight_decay,
-                                    momentum=momentum
-                                    )
-    return optimizer
+# TODO this function can be improved to be more readable and much shorter
 
 
 class Train:
-    def __init__(self, path, run_name='all', prescaler='robust', log2='after', early_stop=100,
-                 early_warmup_stop=100, warmup=1000, random_recs=False, one_model=0, train_after_warmup=1,
-                 balanced_rec_loader=1, variational=0, zinb=0, dann_plates=0, dann_sets=0, predict_tests=0,
-                 n_epochs=10000, dop=1, bout=0, combat=0, add_noise=0, scaler='binarize', tl=0,
-                 loss='mse', inference_inputs=0, tied_weights=0, alpha_warmup=1000, logging=False,
-                 load_tb=True, model_name='ae_classifier', features_selection='f_classif', berm=None):
 
-        self.berm_str = berm
-        self.berm = get_berm(berm)
-        self.train_pool_data = None
-        self.valid_pool_data = None
-        self.test_pool_data = None
+    def __init__(self, args, log_path, fix_thres=-1, load_tb=False):
+        """
 
-        self.features_selection = features_selection
+        Args:
+            args: contains multiple arguments passed in the command line
+            log_path: Path where the tensorboard logs are saved
+            csvs_path: Path to the data (in .csv format)
+            fix_thres: If 1 > fix_thres >= 0 then the threshold is fixed to that value.
+                       any other value means the threshold won't be fixed and will be
+                       learned as an hyperparameter
+            load_tb: If True, loads previous runs already saved
+        """
+        self.args = args
+        self.log_path = log_path
+        self.fix_thres = fix_thres
+        self.load_tb = load_tb
 
-        self.train_after_warmup = train_after_warmup
-        self.model = model_name
+        # berm stands for batch effect removal method
+        self.berm = get_berm(args.batch_removal_method)
         self.verbose = 1
 
-        self.balanced_rec_loader = balanced_rec_loader
-        self.predict_tests = predict_tests
-        self.zinb = zinb
-        self.load_tb = load_tb
-        self.one_model = one_model
-        self.dann_plates = dann_plates
-        self.dann_sets = dann_sets
-        self.tl = tl
-        self.variational = variational
-        self.random_recs = random_recs
-        self.alpha_warmup = alpha_warmup
-        self.tied_weights = tied_weights
-        self.inference_inputs = inference_inputs
-        self.loss = loss
-        self.n_epochs = n_epochs
-        self.bout = bout  # bout means binary outputs. Should be 1 if output is blank vs bacteria only
-        self.dop = dop
-        self.add_noise = add_noise
-        self.early_stop = early_stop
-        self.early_warmup_stop = early_warmup_stop
-        self.warmup = warmup
-        self.run_name = run_name
-        self.prescaler = prescaler  # preprocess scaler
-        self.log2 = log2
-        self.logging = logging
-
-        self.combat = combat
-        self.path = path
-
-        if dann_sets == 1 and dann_plates == 1:
-            print("dann_sets and dann_plates are mutually exclusive. dann_sets will be used")
-
-        # data = minmax_scaler.fit_transform(all_df.values)
-        # all_batches = [x - 2 for x in all_batches]
-        # self.all_plates = np.array([np.argwhere(self.plates == x)[0][0] for x in self.all_plates])
+        if args.dann_sets == 1 and args.dann_plates == 1:
+            self.args.dann_sets = 0
+            print("dann_sets and dann_plates are mutually exclusive. dann_plates will be used")
+        self.data = None
+        self.unique_labels = None
+        self.unique_batches = None
 
     def train(self, params):
-        epoch = 0
-        best_loss = 1000
-        best_closs = 1000
-        best_acc = 0
-        if not self.dann_sets and not self.dann_plates:
+        """
+
+        Args:
+            params:
+
+        Returns:
+
+        """
+        if not self.args.dann_sets and not self.args.dann_plates:
+            # gamma = 0 will ensure DANN is not learned
             params['gamma'] = 0
-        if not self.variational:
+        if not self.args.variational:
+            # beta = 0 because useless outside a variational autoencoder
             params['beta'] = 0
-        if not self.zinb:
+        if not self.args.zinb:
+            # zeta = 0 because useless outside a zinb autoencoder
             params['zeta'] = 0
-        optimizer_type = 'adam'
-        warmup_counter = 0
-        warmup = True
+        if 1 > self.fix_thres >= 0:
+            # fixes the threshold of 0s tolerated for a feature
+            params['thres'] = self.fix_thres
         print(params)
-        # params['thres'] = 0.99
+
         smooth = params['smoothing']
         layer1 = params['layer1']
         layer2 = params['layer2']
-        ncols = params['ncols']
         scale = params['scaler']
         dropout = params['dropout']
         margin = params['margin']
-
-        if ncols > self.all_df.shape[1]:
-            ncols = self.all_df.shape[1]
-
-        n_cats = len(set(self.all_labels))
-
         gamma = params['gamma']
         beta = params['beta']
         zeta = params['zeta']
         thres = params['thres']
         wd = params['wd']
-
         nu = params['nu']
         lr = params['lr']
+        ncols = params['ncols']
+        if ncols > self.data['inputs']['all'].shape[1]:
+            ncols = self.data['inputs']['all'].shape[1]
 
-        # If thres > 0, features that are 0 for a proportion of samples smaller than thres are removed
-        all_data, train_data, valid_data, test_data = \
-            self.keep_good_features(thres, self.all_df, self.train_data, self.valid_data, self.test_data)
+        epoch = 0
+        best_loss = 1000
+        best_closs = 1000
+        best_acc = 0
+        optimizer_type = 'adam'
+        warmup_counter = 0
+        warmup = True
 
-        # Trsnform the data with the chosen scaler
-        all_data, train_data, valid_data, test_data = \
-            self.scale_data(scale, ncols, all_data, train_data, valid_data, test_data)
+        # self.log_path is where tensorboard logs are saved
+        self.log_path += f'{scale}/berm{args.batch_removal_method}/{optimizer_type}/' \
+                         f'ncols{ncols}/thres{thres}/layers_{layer1}-{layer2}/' \
+                         f'd{dropout}/gamma{gamma}/beta{beta}/zeta{zeta}/nu{nu}/' \
+                         f'smooth{smooth}/lr{lr}/wd{wd}/'
+        print(f'See results using: tensorboard --logdir={self.log_path} --port=6006')
 
-        if self.berm is not None:
-            df = pd.DataFrame(all_data)
-            # df[df.isna()] = 0
-            all_data = self.berm(df, self.all_plates)
-            train_data = all_data[:train_data.shape[0]]
-            valid_data = all_data[train_data.shape[0]:train_data.shape[0]+valid_data.shape[0]]
-            test_data = all_data[train_data.shape[0]+valid_data.shape[0]:]
-
-        # Gets all the pytorch dataloaders to train the models
-        all_loader, train_loader, train_loader2, valid_loader, test_loader, valid_loader2, test_loader2 = \
-            self.get_loaders(all_data, train_data, valid_data, test_data, None, None)
-
-        if self.dann_plates:
-            ae = AutoEncoder(all_data.shape[1],
-                             n_batches=len(set(self.all_plates)),
-                             nb_classes=len(set(self.all_labels)),
-                             layer1=layer1, layer2=layer2, dropout=dropout,
-                             variational=self.variational, conditional=False, zinb=self.zinb,
-                             add_noise=False, tied_weights=self.tied_weights).to(device)
-        else:
-            ae = AutoEncoder(all_data.shape[1],
-                             n_batches=3,
-                             nb_classes=len(set(self.all_labels)),
-                             layer1=layer1, layer2=layer2, dropout=dropout,
-                             variational=self.variational, conditional=False, zinb=self.zinb,
-                             add_noise=False, tied_weights=self.tied_weights).to(device)
-        best_ae = copy.deepcopy(ae)
-        classifier = Classifier(layer2, len(set(self.all_labels))).to(device)
-        log_path = f'logs/{self.model}/bout{self.bout}/spd{self.spd}/inference{self.inference_inputs}/' \
-                   f'combat{self.combat}/berm{self.berm_str}/{self.run_name}/n{self.add_noise}/tw{self.tied_weights}/taw{self.train_after_warmup}/' \
-                   f'tl{self.tl}/pseudo{self.predict_tests}/vae{self.variational}/' \
-                   f'zinb{self.zinb}/balanced{self.balanced_rec_loader}/dannset{self.dann_sets}/loss{self.loss}/' \
-                   f'scale{self.prescaler}/log{self.log2}/' \
-                   f'{scale}/{optimizer_type}/ncols{ncols}/thres{thres}/layers_{layer1}-{layer2}/' \
-                   f'd{dropout}/gamma{gamma}/beta{beta}/zeta{zeta}/nu{nu}/smooth{smooth}/lr{lr}/wd{wd}/'
-
-        print(f'See results using: tensorboard --logdir={log_path} --port=6006')
-
-        hparams_filepath = log_path + '/hp'
+        hparams_filepath = self.log_path + '/hp'
         os.makedirs(hparams_filepath, exist_ok=True)
 
-        tb_logging = TensorboardLoggingAE(hparams_filepath, params, tw=self.tied_weights, tl=self.tl,
-                                          variational=self.variational, zinb=self.zinb,
-                                          dann_plates=self.dann_plates, dann_sets=self.dann_sets,
-                                          pseudo=self.predict_tests, train_after_warmup=self.train_after_warmup,
-                                          berm=self.berm_str)
+        tb_logging = TensorboardLoggingAE(hparams_filepath, params, tw=self.args.tied_weights,
+                                          tl=self.args.triplet_loss,
+                                          variational=self.args.variational, zinb=self.args.zinb,
+                                          dann_plates=self.args.dann_plates, dann_sets=self.args.dann_sets,
+                                          pseudo=self.args.predict_tests,
+                                          train_after_warmup=self.args.train_after_warmup,
+                                          berm=self.args.batch_removal_method,
+                                          subs=list(self.data['subs']['train'].keys()))
 
+        # event_acc is used to verify if the hparams have already been tested. If they were,
+        # the best classification loss is retrieved and we go to the next trial
         event_acc = EventAccumulator(hparams_filepath)
         event_acc.Reload()
-        # This verifies if the hparams have already been tested. If they were,
-        # the best classification loss is retrieved and we go to the next trial
         if len(event_acc.Tags()['tensors']) > 2 and self.load_tb:
             best_closs = get_best_values_from_tb(event_acc)
         else:
-            logger_cm = SummaryWriter(
-                f'{log_path}/cm'
-            )
-            logger = SummaryWriter(
-                f'{log_path}/traces'
-            )
+            # If thres > 0, features that are 0 for a proportion of samples smaller than thres are removed
+            data = self.keep_good_features(thres)
+
+            # Transform the data with the chosen scaler
+            data = scale_data(scale, ncols, data)
+
+            if not self.args.dann_sets:
+                data = remove_batch_effect(self.berm, data['all'], data['train'], data['valid'], data['test'],
+                                           self.data['batches']['all'])
+            else:
+                all_sets = np.array([0 for _ in data['train']] + [1 for _ in data['valid']] + [2 for _ in data['test']])
+                data = remove_batch_effect(self.berm, data['all'], data['train'], data['valid'], data['test'], all_sets)
+
+            # Gets all the pytorch dataloaders to train the models
+            loaders = get_loaders(self.data, data, self.args.random_recs, None, None)
+
+            # if using dann_sets, the 3 domains are the train, valid and test sets
+            if self.args.dann_sets:
+                n_batches = 3
+            else:
+                n_batches = len(set(self.data['batches']['all']))
+            ae = AutoEncoder(data['all'].shape[1],
+                             n_batches=n_batches,
+                             nb_classes=len(set(self.data['labels']['all'])),
+                             layer1=layer1, layer2=layer2, dropout=dropout,
+                             variational=self.args.variational, conditional=False, zinb=self.args.zinb,
+                             add_noise=0, tied_weights=self.args.tied_weights).to(device)
+
+            best_ae = copy.deepcopy(ae)
+            logger_cm = SummaryWriter(f'{self.log_path}/cm')
+            logger = SummaryWriter(f'{self.log_path}/traces')
 
             sceloss, celoss, mseloss, triplet_loss = self.get_losses(scale, smooth, margin)
 
             optimizer_ae = get_optimizer(ae, lr, wd, optimizer_type)
 
-            self.log_input_ordination(logger, train_data, valid_data, test_data, epoch)
+            log_input_ordination(logger, self.data, data, epoch)
             values, best_values, best_lists, best_traces = get_empty_dicts()
 
             early_stop_counter = 0
             best_vals = values
-            for epoch in range(epoch, self.n_epochs):
-                if early_stop_counter == self.early_stop:
+            for epoch in range(epoch, self.args.n_epochs):
+                if early_stop_counter == self.args.early_stop:
                     if self.verbose > 0:
                         print('EARLY STOPPING.', epoch)
                     break
-                lists, traces = get_empty_traces()
+                lists, traces = get_empty_traces(self.subcategories)
                 ae.train()
-                # classifier.train()
 
                 # with balanced_red_loader, the number of samples to train the autoencoder is balanced
                 # between the train set (included the valid data) and the test set
-                if self.balanced_rec_loader:
-                    iterator = enumerate(zip(train_loader2, cycle(valid_loader2), cycle(test_loader2)))
+                if self.args.balanced_rec_loader:
+                    iterator = enumerate(zip(loaders['train'], cycle(loaders['valid2']), cycle(loaders['test2'])))
                 else:
-                    iterator = enumerate(zip(all_loader, all_loader, all_loader))
+                    # when train/valid/test are not balanced, then only the first of the three iterators
+                    # is used. We are using 3 times the same loader so that there is 3 iterators so that
+                    # the following code works
+                    iterator = enumerate(zip(loaders['all'], loaders['all'], loaders['all']))
 
-                if warmup or self.train_after_warmup:
+                # If option train_after_warmup=1, then this loop is only for preprocessing
+                if warmup or self.args.train_after_warmup:
                     for i, (train_batch, valid_batch, test_batch) in iterator:
                         optimizer_ae.zero_grad()
-                        data, labels, domain, to_rec, not_to_rec, concs = train_batch
-                        data[torch.isnan(data)] = 0
-                        data = data.to(device).float()
+                        inputs, labels, domain, to_rec, not_to_rec, concs = train_batch
+                        inputs[torch.isnan(inputs)] = 0
+                        inputs = inputs.to(device).float()
                         to_rec = to_rec.to(device).float()
-                        enc, rec, zinb_loss, kld = ae(data, None, 1, sampling=True)
+                        enc, rec, zinb_loss, kld = ae(inputs, None, 1, sampling=True)
                         reverse = ReverseLayerF.apply(enc, 1)
                         domain_preds = ae.dann_discriminator(reverse)
 
-                        if self.dann_sets:
-                            domain = torch.zeros(domain_preds.shape[0], 3).float().to(device)
-                            domain[:, 0] = 1
-                            dloss = celoss(domain_preds, domain)
-                            domain = domain.argmax(1)
-                        elif self.dann_plates:
-                            domain = domain.to(device).long().to(device)
-                            dloss = celoss(domain_preds, domain)
-                        else:
-                            dloss = torch.zeros(1)[0].float().to(device)
-
-
+                        dloss, domain = self.get_dloss(celoss, domain, domain_preds, 0)
                         # rec_loss = triplet_loss(rec, to_rec, not_to_rec)
-                        if self.tl and self.balanced_rec_loader and not warmup:
+                        if self.args.triplet_loss and self.args.balanced_rec_loader and not warmup:
                             not_to_rec = not_to_rec.to(device).float()
                             rec_loss = triplet_loss(rec, to_rec, not_to_rec)
                         else:
                             if scale == 'binarize':
                                 rec = torch.sigmoid(rec)
                             rec_loss = mseloss(rec, to_rec)
-                        traces['losses'] += [rec_loss.item()]
-                        traces['dlosses'] += [dloss.item()]
-                        traces['dacc'] += [np.mean([0 if pred != dom else 1 for pred, dom in
+                        traces['rec_loss'] += [rec_loss.item()]
+                        traces['dom_loss'] += [dloss.item()]
+                        traces['dom_acc'] += [np.mean([0 if pred != dom else 1 for pred, dom in
                                                     zip(domain_preds.detach().cpu().numpy().argmax(1),
                                                         domain.detach().cpu().numpy())])]
 
                         (rec_loss + gamma * dloss + beta * kld.mean() + zeta * zinb_loss).backward()
                         optimizer_ae.step()
-                        if not self.balanced_rec_loader:
+
+                        # Only the first iterator is used if train/valid/test sets are nots balanced
+                        if not self.args.balanced_rec_loader:
                             break
 
                         optimizer_ae.zero_grad()
-                        data, labels, domain, to_rec, not_to_rec, concs = valid_batch
-                        data[torch.isnan(data)] = 0
-                        data = data.to(device).float()
+                        inputs, labels, domain, to_rec, not_to_rec, concs = valid_batch
+                        inputs[torch.isnan(inputs)] = 0
+                        inputs = inputs.to(device).float()
                         to_rec = to_rec.to(device).float()
-                        enc, rec, zinb_loss, kld = ae(data, None, 1, sampling=True)
+                        enc, rec, zinb_loss, kld = ae(inputs, None, 1, sampling=True)
                         reverse = ReverseLayerF.apply(enc, 1)
 
                         domain_preds = ae.dann_discriminator(reverse)
+                        dloss, domain = self.get_dloss(celoss, domain, domain_preds, 1)
 
-                        if self.dann_sets:
-                            domain = torch.zeros(domain_preds.shape[0], 3).float().to(device)
-                            domain[:, 1] = 1
-                            dloss = celoss(domain_preds, domain)
-                            domain = domain.argmax(1)
-                        elif self.dann_plates:
-                            domain = domain.to(device).long().to(device)
-                            dloss = celoss(domain_preds, domain)
-                        else:
-                            dloss = torch.zeros(1)[0].float().to(device)
                         # rec_loss = ((rec - to_rec) ** 2).sum(axis=0).mean()
                         if scale == 'binarize':
                             rec = torch.sigmoid(rec)
                         rec_loss = mseloss(rec, to_rec)
 
-                        traces['losses'][-1] += rec_loss.item()
-                        traces['dlosses'][-1] += dloss.item()
-                        traces['dacc'][-1] += np.mean([0 if pred != dom else 1 for pred, dom in
-                                                        zip(domain_preds.detach().cpu().numpy().argmax(1),
-                                                            domain.detach().cpu().numpy())])
+                        traces['rec_loss'][-1] += rec_loss.item()
+                        traces['dom_loss'][-1] += dloss.item()
+                        traces['dom_acc'][-1] += np.mean([0 if pred != dom else 1 for pred, dom in
+                                                       zip(domain_preds.detach().cpu().numpy().argmax(1),
+                                                           domain.detach().cpu().numpy())])
 
                         (rec_loss + gamma * dloss + beta * kld.mean() + zeta * zinb_loss).backward()
                         optimizer_ae.step()
 
                         optimizer_ae.zero_grad()
-                        data, labels, domain, to_rec, not_to_rec, concs = test_batch
-                        data[torch.isnan(data)] = 0
-                        data = data.to(device).float()
+                        inputs, labels, domain, to_rec, not_to_rec, concs = test_batch
+                        inputs[torch.isnan(inputs)] = 0
+                        inputs = inputs.to(device).float()
                         to_rec = to_rec.to(device).float()
-                        enc, rec, zinb_loss, kld = ae(data, None, 1, sampling=True)
+                        enc, rec, zinb_loss, kld = ae(inputs, None, 1, sampling=True)
                         reverse = ReverseLayerF.apply(enc, 1)
 
                         domain_preds = ae.dann_discriminator(reverse)
 
-                        if self.dann_sets:
-                            domain = torch.zeros(domain_preds.shape[0], 3).float().to(device)
-                            domain[:, 2] = 1
-                            dloss = celoss(domain_preds, domain)
-                            domain = domain.argmax(1)
-                        elif self.dann_plates:
-                            domain = domain.to(device).long().to(device)
-                            dloss = celoss(domain_preds, domain)
-                        else:
-                            dloss = torch.zeros(1)[0].float().to(device)
-                        # rec_loss = ((rec - to_rec) ** 2).sum(axis=0).mean()
-                        if scale == 'binarize':
-                            rec = torch.sigmoid(rec)
+                        dloss, domain = self.get_dloss(celoss, domain, domain_preds, 2)
                         rec_loss = mseloss(rec, to_rec)
 
-                        traces['losses'][-1] += rec_loss.item()
-                        traces['dlosses'][-1] += dloss.item()
-                        traces['dacc'][-1] += [np.mean([0 if pred != dom else 1 for pred, dom in
+                        traces['rec_loss'][-1] += rec_loss.item()
+                        traces['dom_loss'][-1] += dloss.item()
+                        traces['dom_acc'][-1] += [np.mean([0 if pred != dom else 1 for pred, dom in
                                                         zip(domain_preds.detach().cpu().numpy().argmax(1),
                                                             domain.detach().cpu().numpy())])]
 
                         (rec_loss + gamma * dloss + beta * kld.mean() + zeta * zinb_loss).backward()
                         optimizer_ae.step()
-                        traces['losses'][-1] /= 3
-                        traces['dlosses'][-1] /= 3
-                        traces['dacc'][-1] /= 3
 
-                if np.mean(traces['losses']) < best_loss:
+                        # Divided by 3 because the results of train/valid/test have been summed
+                        traces['rec_loss'][-1] /= 3
+                        traces['dom_loss'][-1] /= 3
+                        traces['dom_acc'][-1] /= 3
+
+                if np.mean(traces['rec_loss']) < best_loss:
                     "Every counters go to 0 when a better reconstruction loss is reached"
                     print(
-                        f"Best Loss Epoch {epoch}, Losses: {np.mean(traces['losses'])}, "
-                        f"Domain Losses: {np.mean(traces['dlosses'])}, "
-                        f"Domain Accuracy: {np.mean(traces['dacc'])}")
+                        f"Best Loss Epoch {epoch}, Losses: {np.mean(traces['rec_loss'])}, "
+                        f"Domain Losses: {np.mean(traces['dom_loss'])}, "
+                        f"Domain Accuracy: {np.mean(traces['dom_acc'])}")
                     warmup_counter = 0
                     early_stop_counter = 0
-                    best_loss = np.mean(traces['losses'])
+                    best_loss = np.mean(traces['rec_loss'])
 
-                elif warmup_counter == self.early_warmup_stop and warmup:  # or warmup_counter == 100:
+                elif warmup_counter == self.args.early_warmup_stop and warmup:  # or warmup_counter == 100:
                     # When the warnup counter gets to
                     print(f"\n\nWARMUP FINISHED. {epoch}\n\n")
                     warmup = False
-                if epoch < self.warmup and warmup:  # and np.mean(traces['losses']) >= best_loss:
+                if epoch < self.args.warmup and warmup:  # and np.mean(traces['rec_loss']) >= best_loss:
                     warmup_counter += 1
-                    get_best_values(traces, ae_only=True)
-                    # tb_logging.logging(best_values)
-                    # if best_loss > 1.0
+                    get_best_values(traces, ae_only=True, subs=self.subcategories)
                     continue
                 ae.train()
-                if not self.train_after_warmup:
-                    for param in ae.dec.parameters():
-                        param.requires_grad = False
-                    for param in ae.enc.parameters():
-                        param.requires_grad = False
-                    for param in ae.classifier.parameters():
-                        param.requires_grad = True
 
-                for i, batch in enumerate(train_loader):
-                    optimizer_ae.zero_grad()
-                    data, labels, domain, to_rec, not_to_rec, concs = batch
-                    data[torch.isnan(data)] = 0
-                    data = data.to(device).float()
-                    to_rec = to_rec.to(device).float()
-                    not_to_rec = not_to_rec.to(device).float()
-                    enc, rec, _, kld = ae(data, None, 1, sampling=True)
-                    preds = ae.classifier(enc)
-                    domain_preds = ae.dann_discriminator(enc)
+                # If training of the autoencoder is retricted to the warmup, (train_after_warmup=0),
+                # all layers except the classification layers are frozen
+                ae = self.freeze_layers(ae)
 
-                    classif_loss = sceloss(preds, to_categorical(labels.long(), n_cats).to(device).float())
-                    if self.tl and not self.predict_tests:
-                        rec_loss = triplet_loss(rec, to_rec, not_to_rec)
-                    else:
-                        rec_loss = torch.zeros(1).to(device)[0]
+                closs, lists, traces = self.loop('train', optimizer_ae, ae, sceloss, triplet_loss,
+                                                 loaders['train'], lists, traces, nu=nu)
 
-                    # classif_loss = nllloss(preds, labels.to(device))
-                    lists['train']['set'] += [np.array(['train' for _ in range(len(domain))])]
-                    lists['train']['domains'] += [domain.detach().cpu().numpy()]
-                    lists['train']['domain_preds'] += [domain_preds.detach().cpu().numpy()]
-                    lists['train']['preds'] += [preds.detach().cpu().numpy()]
-                    lists['train']['classes'] += [labels.detach().cpu().numpy()]
-                    lists['train']['concs']['l'] += [concs['lows']]
-                    lists['train']['concs']['h'] += [concs['highs']]
-                    lists['train']['concs']['v'] += [concs['vhighs']]
-                    lists['train']['encoded_values'] += [enc.view(enc.shape[0], -1).detach().cpu().numpy()]
-                    lists['train']['inputs'] += [data.view(rec.shape[0], -1).detach().cpu().numpy()]
-                    lists['train']['rec_values'] += [rec.view(rec.shape[0], -1).detach().cpu().numpy()]
-                    lists['train']['labels'] += [np.array(
-                        [self.unique_labels[x] for x in labels.detach().cpu().numpy()])]
-
-                    traces['train']['acc'] += [np.mean([0 if pred != dom else 1 for pred, dom in
-                                                        zip(preds.detach().cpu().numpy().argmax(1),
-                                                            labels.detach().cpu().numpy())])]
-
-                    if sum(concs['lows']) > -1:
-                        traces['train']['acc_l'] += [np.mean([0 if pred != dom else 1 for pred, dom, low in
-                                                              zip(preds.detach().cpu().numpy().argmax(1),
-                                                                  labels.detach().cpu().numpy(),
-                                                                  concs['lows']) if low > -1])]
-                    if sum(concs['highs']) > -1:
-                        traces['train']['acc_h'] += [np.mean([0 if pred != dom else 1 for pred, dom, high in
-                                                              zip(preds.detach().cpu().numpy().argmax(1),
-                                                                  labels.detach().cpu().numpy(),
-                                                                  concs['highs']) if high > -1])]
-                    if sum(concs['vhighs']) > -1:
-                        traces['train']['acc_v'] += [np.mean([0 if pred != dom else 1 for pred, dom, vhigh in
-                                                              zip(preds.detach().cpu().numpy().argmax(1),
-                                                                  labels.detach().cpu().numpy(),
-                                                                  concs['vhighs']) if vhigh > -1])]
-                    # classif_loss.backward()
-                    # (classif_loss + gamma * domain_loss).backward()
-                    total_loss = nu * classif_loss
-                    if self.train_after_warmup:
-                        total_loss += rec_loss
-                    total_loss.backward()
-                    traces['train']['closs'] += [classif_loss.item()]
-                    # optimizer_classif.step()
-                    optimizer_ae.step()
-
-                if torch.isnan(classif_loss):
+                if torch.isnan(closs):
                     break
                 ae.eval()
-                # classifier.eval()
+                closs, lists, traces = self.loop('valid', None, ae, celoss, triplet_loss,
+                                                 loaders['valid'], lists, traces, nu=0)
+                closs, lists, traces = self.loop('test', None, ae, celoss, triplet_loss,
+                                                 loaders['test'], lists, traces, nu=0)
 
-                for i, batch in enumerate(valid_loader):
-                    # optimizer_ae.zero_grad()
-                    data, labels, domain, to_rec, not_to_rec, concs = batch
-                    data[torch.isnan(data)] = 0
-                    data = data.to(device).float()
-                    # to_rec = to_rec.to(device).float()
-                    enc, rec, _, kld = ae(data, None, 1, sampling=False)
-                    # if self.one_model:
-                    preds = ae.classifier(enc)
-                    domain_preds = ae.dann_discriminator(enc)
-
-                    lists['valid']['set'] += [np.array(['valid' for _ in range(len(domain))])]
-                    lists['valid']['domains'] += [domain.detach().cpu().numpy()]
-                    lists['valid']['domain_preds'] += [domain_preds.detach().cpu().numpy()]
-                    lists['valid']['encoded_values'] += [enc.view(enc.shape[0], -1).detach().cpu().numpy()]
-                    lists['valid']['rec_values'] += [rec.view(rec.shape[0], -1).detach().cpu().numpy()]
-                    lists['valid']['inputs'] += [data.view(rec.shape[0], -1).detach().cpu().numpy()]
-                    lists['valid']['labels'] += [np.array(
-                        [self.unique_labels[x] for x in labels.detach().cpu().numpy()])]
-                    lists['valid']['classes'] += [labels.detach().cpu().numpy()]
-                    lists['valid']['preds'] += [preds.detach().cpu().numpy()]
-                    lists['valid']['concs']['l'] += [concs['lows']]
-                    lists['valid']['concs']['h'] += [concs['highs']]
-                    lists['valid']['concs']['v'] += [concs['vhighs']]
-
-                    # kld_list += [kld.mean().item()]
-                    # losses_list += [rec_loss.item()]
-                    # domain_loss = 0
-                    traces['valid']['acc'] += [np.mean([0 if pred != dom else 1 for pred, dom in
-                                                        zip(preds.detach().cpu().numpy().argmax(1),
-                                                            labels.detach().cpu().numpy())])]
-
-                    if sum(concs['lows']) > -1:
-                        traces['valid']['acc_l'] += [np.mean([0 if pred != dom else 1 for pred, dom, low in
-                                                              zip(preds.detach().cpu().numpy().argmax(1),
-                                                                  labels.detach().cpu().numpy(),
-                                                                  concs['lows']) if low > -1])]
-                    if sum(concs['highs']) > -1:
-                        traces['valid']['acc_h'] += [np.mean([0 if pred != dom else 1 for pred, dom, high in
-                                                              zip(preds.detach().cpu().numpy().argmax(1),
-                                                                  labels.detach().cpu().numpy(),
-                                                                  concs['highs']) if high > -1])]
-                    if sum(concs['vhighs']) > -1:
-                        traces['valid']['acc_v'] += [np.mean([0 if pred != dom else 1 for pred, dom, vhigh in
-                                                              zip(preds.detach().cpu().numpy().argmax(1),
-                                                                  labels.detach().cpu().numpy(),
-                                                                  concs['vhighs']) if vhigh > -1])]
-
-                    # domain_loss = celoss(domain_preds, to_categorical(domain.long(), n_domains).to(device).float())
-                    # classif_loss = nllloss(preds, labels.to(device))
-                    classif_loss = celoss(preds, to_categorical(labels.long(), n_cats).to(device).float())
-                    # (rec_loss + gamma * domain_loss).backward()
-                    # (gamma * domain_loss).backward()
-                    traces['valid']['closs'] += [classif_loss.item()]
-                    # domain_losses += [domain_loss.item()]
-                    # del data, batch, rec, enc, domain, domain_loss  # , regularization_loss, param
-
-                for i, batch in enumerate(test_loader):
-
-                    data, labels, domain, to_rec, not_to_rec, concs = batch
-                    data[torch.isnan(data)] = 0
-                    data = data.to(device).float()
-                    # to_rec = to_rec.to(device).float()
-                    enc, rec, _, kld = ae(data, None, 1, sampling=False)
-                    # if self.one_model:
-                    preds = ae.classifier(enc)
-                    domain_preds = ae.dann_discriminator(enc)
-                    lists['test']['set'] += [np.array(['test' for _ in range(len(domain))])]
-                    lists['test']['domains'] += [domain.detach().cpu().numpy()]
-                    lists['test']['domain_preds'] += [domain_preds.detach().cpu().numpy()]
-                    lists['test']['encoded_values'] += [enc.view(enc.shape[0], -1).detach().cpu().numpy()]
-                    lists['test']['rec_values'] += [rec.view(rec.shape[0], -1).detach().cpu().numpy()]
-                    lists['test']['inputs'] += [data.view(rec.shape[0], -1).detach().cpu().numpy()]
-                    lists['test']['labels'] += [np.array(
-                        [self.unique_labels[x] for x in labels.detach().cpu().numpy()])]
-                    lists['test']['preds'] += [preds.detach().cpu().numpy()]
-                    lists['test']['classes'] += [labels.detach().cpu().numpy()]
-                    lists['test']['concs']['l'] += [concs['lows']]
-                    lists['test']['concs']['h'] += [concs['highs']]
-                    lists['test']['concs']['v'] += [concs['vhighs']]
-
-                    traces['test']['acc'] += [np.mean([0 if pred != dom else 1 for pred, dom in
-                                                       zip(preds.detach().cpu().numpy().argmax(1),
-                                                           labels.detach().cpu().numpy())])]
-
-                    tmp = []
-                    if sum(concs['lows']) > -1:
-                        traces['test']['acc_l'] += [np.mean([0 if pred != dom else 1 for pred, dom, low in
-                                                             zip(preds.detach().cpu().numpy().argmax(1),
-                                                                 labels.detach().cpu().numpy(),
-                                                                 concs['lows']) if low > -1])]
-                        tmp += [traces['test']['acc_l'][-1]]
-                    if sum(concs['highs']) > -1:
-                        traces['test']['acc_h'] += [np.mean([0 if pred != dom else 1 for pred, dom, high in
-                                                             zip(preds.detach().cpu().numpy().argmax(1),
-                                                                 labels.detach().cpu().numpy(),
-                                                                 concs['highs']) if high > -1])]
-                        tmp += [traces['test']['acc_h'][-1]]
-                    if sum(concs['vhighs']) > -1:
-                        traces['test']['acc_v'] += [np.mean([0 if pred != dom else 1 for pred, dom, vhigh in
-                                                             zip(preds.detach().cpu().numpy().argmax(1),
-                                                                 labels.detach().cpu().numpy(),
-                                                                 concs['vhighs']) if vhigh > -1])]
-                        tmp += [traces['test']['acc_v'][-1]]
-                    # domain_loss = celoss(domain_preds, to_categorical(domain.long(), n_domains).to(device).float())
-                    classif_loss = celoss(preds, to_categorical(labels.long(), n_cats).to(device).float())
-                    # classif_loss = nllloss(preds, labels.to(device))
-                    # (rec_loss + gamma * domain_loss).backward()
-                    traces['test']['closs'] += [classif_loss.item()]
-                    # domain_losses += [domain_loss.item()]
-                    # del data, batch, rec, enc, domain, domain_loss  # , regularization_loss, param
-
-                # values['train']['ld'] += [torch.mean(kld).item()]
-                for group in lists.keys():
-                    preds, classes = np.concatenate(lists[group]['preds']).argmax(1), np.concatenate(
-                        lists[group]['classes'])
-                    traces[group]['mcc'] = MCC(preds, classes)
-                    inds = torch.concat(lists[group]['concs']['l']).detach().cpu().numpy()
-                    inds = np.array([i for i, x in enumerate(inds) if x > -1])
-                    traces[group]['mcc_l'] = MCC(preds[inds], classes[inds])
-                    inds = torch.concat(lists[group]['concs']['h']).detach().cpu().numpy()
-                    inds = np.array([i for i, x in enumerate(inds) if x > -1])
-                    traces[group]['mcc_h'] = MCC(preds[inds], classes[inds])
-                    inds = torch.concat(lists[group]['concs']['v']).detach().cpu().numpy()
-                    inds = np.array([i for i, x in enumerate(inds) if x > -1])
-                    traces[group]['mcc_v'] = MCC(preds[inds], classes[inds])
-
-                values = log_traces(traces, values)
+                traces = self.get_mccs(lists, traces, list(self.data['subs']['all'].keys()))
+                values = log_traces(traces, values, subsets=self.subcategories)
                 try:
                     add_to_logger(values, logger, epoch)
                 except:
                     pass
 
                 if values['valid']['acc'][-1] > best_acc:
+                    subs_accs = ''
+                    for k in list(self.data['subs']['all'].keys()):
+                        subs_accs += f"{k}: {values['test'][f'acc_{k}'][-1]}, "
                     print(f"Best Classification Acc Epoch {epoch}, "
-                          f"Acc: {values['test']['acc'][-1]}, "
-                          f"Lows: {values['test']['acc_l'][-1]}, "
-                          f"Highs: {values['test']['acc_h'][-1]}, "
-                          f"VHighs: {values['test']['acc_v'][-1]}"
+                          f"Acc: {values['test']['acc'][-1]}, {subs_accs}"
                           f"Classification train loss: {values['train']['closs'][-1]},"
                           f" valid loss: {values['valid']['closs'][-1]},"
                           f" test loss: {values['test']['closs'][-1]}")
+
                     best_acc = values['valid']['acc'][-1]
                     early_stop_counter = 0
 
                 if values['valid']['closs'][-1] < best_closs:
-                    if self.logging:
-                        self.log_stuff(logger_cm, logger, lists, values, traces, ae, epoch)
-
+                    # if self.logging:
+                    #     log_stuff(logger_cm, logger, lists, values, traces, ae,
+                    #               self.unique_labels, self.data['batches'], epoch, device=device)
+                    subs_accs = ''
+                    for k in list(self.data['subs']['train'].keys()):
+                        subs_accs += f"{k}: {values['test'][f'acc_{k}'][-1]}, "
                     print(f"Best Classification Loss Epoch {epoch}, "
-                          f"Acc: {values['test']['acc'][-1]}, "
-                          f"Lows: {values['test']['acc_l'][-1]}, "
-                          f"Highs: {values['test']['acc_h'][-1]}, "
-                          f"VHighs: {values['test']['acc_v'][-1]}"
-                          f"Classification train loss: {values['train']['closs'][-1]},"
-                          f" valid loss: {values['valid']['closs'][-1]},"
-                          f" test loss: {values['test']['closs'][-1]}")
+                          f"Acc: {values['test']['acc'][-1]}, {subs_accs}"
+                          f"Classification train loss: {values['train']['closs'][-1]}, "
+                          f"valid loss: {values['valid']['closs'][-1]}, "
+                          f"test loss: {values['test']['closs'][-1]}")
                     best_closs = values['valid']['closs'][-1]
-                    best_values = get_best_values(values, ae_only=False)
+                    best_values = get_best_values(values, ae_only=False, subs=self.subcategories)
                     # best_acc = values['valid']['acc'][-1]
                     best_vals = values
                     best_ae = copy.deepcopy(ae)
@@ -631,852 +369,290 @@ class Train:
                     # if epoch > self.warmup:
                     early_stop_counter += 1
 
-                if self.predict_tests:
-                    all_loader, train_loader, train_loader2, \
-                        valid_loader, test_loader, valid_loader2, \
-                        test_loader2 = self.get_loaders(all_data, train_data, valid_data,
-                                                        test_data, ae, ae.classifier)
-                elif self.tl:
-                    all_loader, train_loader, train_loader2, \
-                        valid_loader, test_loader, valid_loader2, \
-                        test_loader2 = self.get_loaders(all_data, train_data, valid_data,
-                                                        test_data, ae, classifier)
-
+                if self.args.predict_tests:
+                    loaders = get_loaders(self.data, data, self.args.random_recs, ae, ae.classifier)
             try:
-                self.log_stuff(logger_cm, logger, best_lists, best_vals, best_traces, best_ae, epoch)
+                log_stuff(logger_cm, logger, best_lists, best_vals, best_traces, best_ae,
+                          self.unique_labels, self.data['batches'], epoch, device=device)
             except:
                 pass
             tb_logging.logging(best_values)
 
         return best_closs
 
-    def get_data(self, classif):
-        # TODO Solve preprocess so this is not necessary
-        try:
-            train_data = pd.read_csv(
-                f"{self.path}/matrices/mz{self.mz_bin}/rt{self.rt_bin}/{self.spd}spd/"
-                f"combat{self.combat}/stride{self.stride}/{self.prescaler}/"
-                f"log{self.log2}/{self.features_selection}/train/{self.run_name}/"
-                f"BACT_train_inputs_gt0.0_{self.run_name}.csv"
-            )
-        except:
-            train_data = pd.read_csv(
-                f"{self.path}/matrices/mz{self.mz_bin}/rt{self.rt_bin}/{self.spd}spd/"
-                f"combat{self.combat}/stride{self.stride}/{self.prescaler}/"
-                f"log{self.log2}/{self.features_selection}/train/{self.run_name}/"
-                f"BACT_train_inputs_{self.run_name}.csv"
-            )
-        try:
-            self.train_pool_data = pd.read_csv(
-                f"{self.path}/matrices/mz{self.mz_bin}/rt{self.rt_bin}/{self.spd}spd/"
-                f"combat{self.combat}/stride{self.stride}/{self.prescaler}/"
-                f"log{self.log2}/{self.features_selection}/train/{self.run_name}/"
-                f"BACT_pool_inputs_gt0.0_{self.run_name}.csv"
-            )
-        except:
-            self.train_pool_data = pd.read_csv(
-                f"{self.path}/matrices/mz{self.mz_bin}/rt{self.rt_bin}/{self.spd}spd/"
-                f"combat{self.combat}/stride{self.stride}/{self.prescaler}/"
-                f"log{self.log2}/{self.features_selection}/train/{self.run_name}/"
-                f"BACT_pool_inputs_{self.run_name}.csv"
-            )
+    def loop(self, group, optimizer_ae, ae, celoss, triplet_loss, loader, lists, traces, nu=1):
+        """
 
-        valid_data = pd.read_csv(
-            f"{self.path}/matrices/mz{self.mz_bin}/rt{self.rt_bin}/{self.spd}spd/"
-            f"combat{self.combat}/stride{self.stride}/{self.prescaler}/"
-            f"log{self.log2}/{self.features_selection}/valid/{self.run_name}/"
-            f"BACT_valid_inputs_{self.run_name}.csv"
-        )
-        self.valid_pool_data = pd.read_csv(
-            f"{self.path}/matrices/mz{self.mz_bin}/rt{self.rt_bin}/{self.spd}spd/"
-            f"combat{self.combat}/stride{self.stride}/{self.prescaler}/"
-            f"log{self.log2}/{self.features_selection}/valid/{self.run_name}/"
-            f"BACT_valid_pool_inputs_{self.run_name}.csv"
-        )
-        test_data = pd.read_csv(
-            f"{self.path}/matrices/mz{self.mz_bin}/rt{self.rt_bin}/{self.spd}spd/"
-            f"combat{self.combat}/stride{self.stride}/{self.prescaler}/"
-            f"log{self.log2}/{self.features_selection}/test/{self.run_name}/"
-            f"BACT_inference_inputs_{self.run_name}.csv"
-        )
+        Args:
+            group:
+            optimizer_ae:
+            ae:
+            celoss:
+            triplet_loss:
+            loader:
+            lists:
+            traces:
+            nu:
 
-        self.test_pool_data = pd.read_csv(
-            f"{self.path}/matrices/mz{self.mz_bin}/rt{self.rt_bin}/{self.spd}spd/"
-            f"combat{self.combat}/stride{self.stride}/{self.prescaler}/"
-            f"log{self.log2}/{self.features_selection}/test/{self.run_name}/"
-            f"BACT_inference_pool_inputs_{self.run_name}.csv"
-        )
+        Returns:
 
-        self.train_names = train_data['ID']
-        self.train_labels = np.array([d.split('_')[1].split('-')[0] for d in self.train_names])
-        self.train_batches = np.array([int(d.split('_')[0]) for d in self.train_names])
-
-        self.valid_names = valid_data['ID']
-        self.valid_labels = np.array([d.split('_')[1].split('-')[0] for d in self.valid_names])
-        self.valid_batches = np.array([int(d.split('_')[0]) for d in self.valid_names])
-
-        self.test_names = test_data['ID']
-        self.test_labels = np.array([d.split('_')[1].split('-')[0] for d in self.test_names])
-        self.test_batches = np.array([int(d.split('_')[0]) for d in self.test_names])
-
-        # Drops the ID column
-        self.train_data = train_data.iloc[:, 1:]
-        self.valid_data = valid_data.iloc[:, 1:]
-        self.test_data = test_data.iloc[:, 1:]
-
-        # TODO Find out why valid and test have 1 column less; all the rest is fine, columns are the same
-        if self.train_data.shape[1] > self.valid_data.shape[1]:
-            self.train_data = self.train_data.iloc[:, :-1]
-
-        # train_columns = train_data.columns
-        self.unique_labels = get_unique_labels(self.train_labels)
-        self.train_cats = np.array([np.where(x == self.unique_labels)[0][0] for i, x in enumerate(self.train_labels)])
-        self.train_highs = np.array(
-            [i if 'h' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.train_names)])
-        self.train_vhighs = np.array(
-            [i if 'v' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.train_names)])
-        self.train_lows = np.array(
-            [i if 'l' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.train_names)])
-
-        self.valid_cats = np.array([np.where(x == self.unique_labels)[0][0] for i, x in enumerate(self.valid_labels)])
-        self.valid_highs = np.array(
-            [i if 'h' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.valid_names)])
-        self.valid_vhighs = np.array(
-            [i if 'v' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.valid_names)])
-        self.valid_lows = np.array(
-            [i if 'l' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.valid_names)])
-
-        self.test_cats = np.array([np.where(x == self.unique_labels)[0][0] for i, x in enumerate(self.test_labels)])
-        self.test_highs = np.array(
-            [i if 'h' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.test_names)])
-        self.test_vhighs = np.array(
-            [i if 'v' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.test_names)])
-        self.test_lows = np.array(
-            [i if 'l' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.test_names)])
-
-        train_batches_infos = pd.read_csv(f'{self.path}/RD150_SamplePrep_Juillet_Samples.csv', index_col=0)
-        train_batches_infos.index = [x.lower() for x in train_batches_infos.index]
-        plates = pd.DataFrame(train_batches_infos['Plate'], index=train_batches_infos.index, columns=['Plate'])
-        plates = pd.concat((plates, pd.DataFrame(1, index=['blk'], columns=['Plate'])))
-        plates = pd.concat((plates, pd.DataFrame(2, index=['blk_p2'], columns=['Plate'])))
-        plates = pd.concat((plates, pd.DataFrame(3, index=['blk_p3'], columns=['Plate'])))
-        plates = pd.concat((plates, pd.DataFrame(4, index=['blk_p4'], columns=['Plate'])))
-        # Adds 4 because they are not the same plates as in plates
-        # test_plates['Plate'] = [5 for _ in test_plates['Plate']]
-
-        train_plates = np.array(
-            [plates.loc[x.split('_')[1]].values[0] if 'blk_p' not in x else int(x.split('blk_p')[1].split('-')[0])
-             for
-             x in self.train_names]
-        )
-
-        valid_batches_infos = pd.read_csv(f'{self.path}/RD150_SamplePrep_Novembre_Samples.csv', index_col=0)
-        valid_batches_infos.index = [x.lower() for x in valid_batches_infos.index]
-        valid_plates = pd.DataFrame(valid_batches_infos['Plate'], index=valid_batches_infos.index, columns=['Plate'])
-        valid_plates = pd.concat((valid_plates, pd.DataFrame(8, index=['blk'], columns=['Plate'])))
-        valid_plates = np.array([valid_plates.loc[x.split('_')[1]].values[0] for x in self.valid_names])
-
-        test_batches_infos = pd.read_csv(f'{self.path}/RD159_SamplePreparation_Part.1.csv', index_col=0)
-        test_batches_infos.index = [x.lower() for x in test_batches_infos.index]
-        test_plates = pd.DataFrame(test_batches_infos['Plate'], index=test_batches_infos.index, columns=['Plate'])
-        test_plates = pd.concat((test_plates, pd.DataFrame(11, index=['blk'], columns=['Plate'])))
-        test_plates = np.array([test_plates.loc[x.split('_')[1]].values[0] for x in self.test_names])
-        test_plates[np.argwhere(test_plates == 11)[:, 0][8:16]] = 12
-        # TODO test_data seem to have a different number of columns...
-
-        self.plates = np.array(list(set(np.concatenate((train_plates, valid_plates, test_plates)))))
-        self.train_plates = np.array([np.argwhere(self.plates == x)[0][0] for x in train_plates])
-        self.valid_plates = np.array([np.argwhere(self.plates == x)[0][0] for x in valid_plates])
-        self.test_plates = np.array([np.argwhere(self.plates == x)[0][0] for x in test_plates])
-
-        self.all_df = pd.concat((self.train_data, self.valid_data, self.test_data), 0)
-        self.train_samples = np.array(
-            [1 for _ in self.train_labels] + [0 for _ in self.valid_labels] + [0 for _ in self.test_labels])
-        self.all_labels = np.concatenate((self.train_labels, self.valid_labels, self.test_labels))
-        self.all_batches = np.concatenate((self.train_batches, self.valid_batches, self.test_batches))
-        self.all_plates = np.concatenate((self.train_plates, self.valid_plates, self.test_plates))
-        self.all_cats = np.concatenate((self.train_cats, self.valid_cats, self.test_cats))
-        self.all_lows = np.concatenate((self.train_lows, self.valid_lows, self.test_lows))
-        self.all_highs = np.concatenate((self.train_highs, self.valid_highs, self.test_highs))
-        self.all_vhighs = np.concatenate((self.train_vhighs, self.valid_vhighs, self.test_vhighs))
-
-        if classif != 'all':
-            # plate = int()
-            inds = np.where(self.train_plates == classif)[0]
-            self.train_data = self.train_data.iloc[inds]
-            self.train_labels = self.train_labels[inds]
-            self.train_plates = self.train_plates[inds]
-            self.train_names = self.train_names[inds].to_numpy()
-            self.train_batches = self.train_batches[inds]
-            self.train_cats = self.train_cats[inds]
-            self.unique_labels = np.unique(self.train_labels)
-
-            inds = np.where(self.valid_plates == classif)[0]
-            self.valid_data = self.valid_data.iloc[inds]
-            self.valid_labels = self.valid_labels[inds]
-            self.valid_plates = self.valid_plates[inds]
-            self.valid_names = self.valid_names[inds].to_numpy()
-            self.valid_batches = self.valid_batches[inds]
-            self.valid_cats = self.valid_cats[inds]
-
-            inds = np.array([i for i, x in enumerate(self.test_labels) if x in np.unique(self.train_labels)])
-            self.test_data = self.test_data.iloc[inds]
-            self.test_labels = self.test_labels[inds]
-            self.test_plates = self.test_plates[inds]
-            # test_names = test_names[inds].to_numpy()
-            # test_batches = test_batches[inds]
-            self.test_cats = self.test_cats[inds]
-
-        self.valid_highs = [i if 'h' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.valid_names)]
-        self.valid_vhighs = [i if 'v' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.valid_names)]
-        self.valid_lows = [i if 'l' in x.split('_')[2] or 'blk' in x else -1 for i, x in enumerate(self.valid_names)]
-        train_lows2 = np.concatenate((self.train_lows, self.valid_lows))
-        train_highs2 = np.concatenate((self.train_highs, self.valid_highs))
-        train_vhighs2 = np.concatenate((self.train_vhighs, self.valid_vhighs))
-
-        self.concs = {
-            'all': {
-                'lows': self.all_lows,
-                'highs': self.all_highs,
-                'vhighs': self.all_vhighs,
-            },
-            'train': {
-                'lows': self.train_lows,
-                'highs': self.train_highs,
-                'vhighs': self.train_vhighs,
-            },
-            'train2': {
-                'lows': train_lows2,
-                'highs': train_highs2,
-                'vhighs': train_vhighs2,
-            },
-            'valid': {
-                'lows': self.valid_lows,
-                'highs': self.valid_highs,
-                'vhighs': self.valid_vhighs,
-            },
-            'test': {
-                'lows': self.test_lows,
-                'highs': self.test_highs,
-                'vhighs': self.test_vhighs,
-            },
-        }
-
-    def scale_data(self, scale, ncols, data, train_data, valid_data, test_data):
-        if scale == 'binarize':
-            data = data.values[:, :ncols]
-            train_data = train_data.values[:, :ncols]
-            valid_data = valid_data.values[:, :ncols]
-            test_data = test_data.values[:, :ncols]
-            data[data > 0.] = 1
-            train_data[train_data > 0.] = 1
-            valid_data[valid_data > 0.] = 1
-            test_data[test_data > 0.] = 1
-        elif scale == 'robust':
-            scaler = RobustScaler()
-
-            data = scaler.fit_transform(self.all_df.values[:, :ncols])
-            train_data = scaler.transform(self.train_data.values[:, :ncols])
-            valid_data = scaler.transform(self.valid_data.values[:, :ncols])
-            test_data = scaler.transform(self.test_data.values[:, :ncols])
-        elif scale == 'standard':
-            scaler = StandardScaler()
-
-            data = scaler.fit_transform(self.all_df.values[:, :ncols])
-            train_data = scaler.transform(self.train_data.values[:, :ncols])
-            valid_data = scaler.transform(self.valid_data.values[:, :ncols])
-            test_data = scaler.transform(self.test_data.values[:, :ncols])
-        elif scale == 'l1':
-            scaler = Normalizer(norm='l1')
-
-            data = scaler.fit_transform(self.all_df.values[:, :ncols])
-            train_data = scaler.transform(self.train_data.values[:, :ncols])
-            valid_data = scaler.transform(self.valid_data.values[:, :ncols])
-            test_data = scaler.transform(self.test_data.values[:, :ncols])
-        elif scale == 'l2':
-            scaler = Normalizer(norm='l2')
-
-            data = scaler.fit_transform(self.all_df.values[:, :ncols])
-            train_data = scaler.transform(self.train_data.values[:, :ncols])
-            valid_data = scaler.transform(self.valid_data.values[:, :ncols])
-            test_data = scaler.transform(self.test_data.values[:, :ncols])
+        """
+        n_cats = len(np.unique(self.data['labels']['all']))
+        if group == 'train':
+            sampling = True
         else:
-            data = self.all_df.values[:, :ncols]
-            train_data = self.train_data.values[:, :ncols]
-            valid_data = self.valid_data.values[:, :ncols]
-            test_data = self.test_data.values[:, :ncols]
-        if scale != 'none':
-            scaler = MinMaxScaler()
+            sampling = False
+        classif_loss = None
+        for i, batch in enumerate(loader):
+            if group == 'train':
+                optimizer_ae.zero_grad()
+            data, labels, domain, to_rec, not_to_rec, concs = batch
+            data[torch.isnan(data)] = 0
+            data = data.to(device).float()
+            to_rec = to_rec.to(device).float()
+            not_to_rec = not_to_rec.to(device).float()
+            enc, rec, _, kld = ae(data, None, 1, sampling=sampling)
+            preds = ae.classifier(enc)
+            domain_preds = ae.dann_discriminator(enc)
 
-            data = scaler.fit_transform(data)
-            train_data = scaler.transform(train_data)
-            valid_data = scaler.transform(valid_data)
-            test_data = scaler.transform(test_data)
+            classif_loss = celoss(preds, to_categorical(labels.long(), n_cats).to(device).float())
+            if self.args.triplet_loss and not self.args.predict_tests:
+                rec_loss = triplet_loss(rec, to_rec, not_to_rec)
+            else:
+                rec_loss = torch.zeros(1).to(device)[0]
 
-        return data, train_data, valid_data, test_data
+            lists[group]['set'] += [np.array([group for _ in range(len(domain))])]
+            lists[group]['domains'] += [domain.detach().cpu().numpy()]
+            lists[group]['domain_preds'] += [domain_preds.detach().cpu().numpy()]
+            lists[group]['preds'] += [preds.detach().cpu().numpy()]
+            lists[group]['classes'] += [labels.detach().cpu().numpy()]
+            lists[group]['encoded_values'] += [enc.view(enc.shape[0], -1).detach().cpu().numpy()]
+            lists[group]['inputs'] += [data.view(rec.shape[0], -1).detach().cpu().numpy()]
+            lists[group]['rec_values'] += [rec.view(rec.shape[0], -1).detach().cpu().numpy()]
+            lists[group]['labels'] += [np.array(
+                [self.unique_labels[x] for x in labels.detach().cpu().numpy()])]
 
-    def get_loaders(self, all_data, train_data, valid_data, test_data, ae=None, classifier=None):
-        transform = torchvision.transforms.Compose([
-            torchvision.transforms.ToTensor(),
-            # torchvision.transforms.Normalize(all_data.mean(), all_data.std()),
-        ])
-        train_set = MSDataset3(train_data, True, self.train_cats,
-                               [x for x in self.train_plates], self.concs['train'],
-                               transform=transform, crop_size=-1, random_recs=self.random_recs,
-                               quantize=False, device=device)
-        # train_data2 = np.concatenate((train_data, valid_data), 0)
-        # train_plates2 = np.concatenate((self.train_plates, self.valid_plates))
-        # train_cats2 = np.concatenate((self.train_cats, self.valid_cats))
+            traces[group]['acc'] += [np.mean([0 if pred != dom else 1 for pred, dom in
+                                              zip(preds.detach().cpu().numpy().argmax(1),
+                                                  labels.detach().cpu().numpy())])]
 
-        train_set2 = MSDataset3(train_data, True, self.train_cats,
-                                [x for x in self.train_plates], self.concs['train2'],
-                                transform=transform, crop_size=-1, random_recs=self.random_recs,
-                                quantize=False, device=device)
-        valid_set = MSDataset3(valid_data, True, self.valid_cats,
-                               [x for x in self.valid_plates], self.concs['valid'],
-                               transform=transform, crop_size=-1, random_recs=False,
-                               quantize=False, device=device)
-        valid_set2 = MSDataset3(valid_data, True, self.valid_cats,
-                               [x for x in self.valid_plates], self.concs['valid'],
-                               transform=transform, crop_size=-1, random_recs=self.random_recs,
-                               quantize=False, device=device)
-        test_set = MSDataset3(test_data, True, self.test_cats, [x for x in self.test_plates],
-                              self.concs['test'],
-                              transform=transform, crop_size=-1, random_recs=False,
-                              quantize=False, device=device)
-        test_set2 = MSDataset3(test_data, True, self.test_cats, [x for x in self.test_plates],
-                              self.concs['test'],
-                              transform=transform, crop_size=-1, random_recs=self.random_recs,
-                              quantize=False, device=device)
-        train_loader = DataLoader(train_set,
-                                  num_workers=0,
-                                  shuffle=True,
-                                  batch_size=8,
-                                  pin_memory=False,
-                                  drop_last=True)
-        train_loader2 = DataLoader(train_set2,
-                                   num_workers=0,
-                                   shuffle=True,
-                                   batch_size=8,
-                                   pin_memory=False,
-                                   drop_last=True)
+            for k in list(concs.keys()):
+                lists[group]['concs'][k] += [concs[k]]
+                if sum(concs[k]) > -1:
+                    traces[group][f'acc_{k}'] += [np.mean([0 if pred != dom else 1 for pred, dom, low in
+                                                           zip(preds.detach().cpu().numpy().argmax(1),
+                                                               labels.detach().cpu().numpy(),
+                                                               concs[k]) if low > -1])]
+            traces[group]['closs'] += [classif_loss.item()]
 
-        test_loader = DataLoader(test_set,
-                                 num_workers=0,
-                                 shuffle=False,
-                                 batch_size=1,
-                                 pin_memory=False,
-                                 drop_last=False)
-        valid_loader = DataLoader(valid_set,
-                                  num_workers=0,
-                                  shuffle=False,
-                                  batch_size=1,
-                                  pin_memory=False,
-                                  drop_last=False)
-        test_loader2 = DataLoader(test_set2,
-                                  num_workers=0,
-                                  shuffle=False,
-                                  batch_size=8,
-                                  pin_memory=False,
-                                  drop_last=True)
-        valid_loader2 = DataLoader(valid_set2,
-                                   num_workers=0,
-                                   shuffle=False,
-                                   batch_size=8,
-                                   pin_memory=False,
-                                   drop_last=True)
-        if ae is not None:
-            valid_cats = []
-            test_cats = []
-            ae.eval()
-            classifier.eval()
-            for i, batch in enumerate(valid_loader):
-                # optimizer_ae.zero_grad()
-                data, labels, domain, to_rec, not_to_rec, concs = batch
-                data[torch.isnan(data)] = 0
-                data = data.to(device).float()
-                # to_rec = to_rec.to(device).float()
-                enc, rec, _, kld = ae(data, None, 1, sampling=False)
-                # if self.one_model:
-                preds = ae.classifier(enc)
-                # else:
-                #     preds = classifier(enc)
-                domain_preds = ae.dann_discriminator(enc)
-                valid_cats += [preds.detach().cpu().numpy().argmax(1)]
-            for i, batch in enumerate(test_loader):
-                # optimizer_ae.zero_grad()
-                data, labels, domain, to_rec, not_to_rec, concs = batch
-                data[torch.isnan(data)] = 0
-                data = data.to(device).float()
-                # to_rec = to_rec.to(device).float()
-                enc, rec, _, kld = ae(data, None, 1, sampling=False)
-                # if self.one_model:
-                preds = ae.classifier(enc)
-                domain_preds = ae.dann_discriminator(enc)
-                # else:
-                #     preds = classifier(enc)
-                test_cats += [preds.detach().cpu().numpy().argmax(1)]
+            if group == 'train':
+                total_loss = nu * classif_loss
+                if self.args.train_after_warmup:
+                    total_loss += rec_loss
+                total_loss.backward()
+                optimizer_ae.step()
 
-            all_cats = np.concatenate(
-                (self.train_cats, np.stack(valid_cats).reshape(-1), np.stack(test_cats).reshape(-1)))
-            all_set = MSDataset3(all_data, True, all_cats, [x for x in self.all_plates],
-                                 self.concs['all'], transform=transform, crop_size=-1,
-                                 random_recs=self.random_recs, quantize=False, device=device)
+        return classif_loss, lists, traces
 
+    def get_dloss(self, celoss, domain, domain_preds, set_num=None):
+        """
+        This function is used to get the domain loss
+        Args:
+            celoss: PyTorch CrossEntropyLoss instance object
+            domain: If not dann_sets, one-hot encoded domain classes []
+            domain_preds: Matrix containing the predicted domains []
+            set_num: If dann_sets, defines what the domain is.
+                     train=0, valid=1, test=2
+
+        Returns:
+
+        """
+        if self.args.dann_sets:
+            domain = torch.zeros(domain_preds.shape[0], 3).float().to(device)
+            domain[:, set_num] = 1
+            dloss = celoss(domain_preds, domain)
+            domain = domain.argmax(1)
+        elif self.args.dann_plates:
+            domain = domain.to(device).long().to(device)
+            dloss = celoss(domain_preds, domain)
         else:
-            all_set = MSDataset3(all_data, True, self.all_cats, [x for x in self.all_plates],
-                                 self.concs['all'], transform=transform, crop_size=-1,
-                                 random_recs=self.random_recs, quantize=False, device=device)
+            dloss = torch.zeros(1)[0].float().to(device)
+        return dloss, domain
 
-        all_loader = DataLoader(all_set,
-                                num_workers=0,
-                                shuffle=True,
-                                batch_size=8,
-                                pin_memory=False,
-                                drop_last=True)
+    def get_data(self, csvs_path):
+        """
 
-        return all_loader, train_loader, train_loader2, valid_loader, test_loader, valid_loader2, test_loader2
 
-    # TODO this function can be improved to be more readable and much shorter
-    def log_stuff(self, logger_images, logger, lists, values, traces, classifier, epoch):
-        values = log_metrics(lists, values)
-        for repres in ['enc', 'rec', 'inputs']:
-            for metric in ['silhouette', 'kbet', 'lisi']:
-                for info in ['labels', 'domains']:
-                    for group in ['train', 'valid', 'test']:
-                        if metric == 'lisi':
-                            try:
-                                logger.add_scalar(f'{metric}/{group}/{repres}/{info}',
-                                                  values[group][metric][repres][info][0][0], epoch)
-                            except:
-                                logger.add_scalar(f'{metric}/{group}/{repres}/{info}',
-                                                  values[group][metric][repres][info][0], epoch)
+        Returns: Nothing
 
-                        elif metric == 'silhouette':
-                            logger.add_scalar(f'{metric}/{group}/{repres}/{info}',
-                                              values[group][metric][repres][info][0], epoch)
-                        elif metric == 'kbet':
-                            try:
-                                logger.add_scalar(f'{metric}/{group}/{repres}/{info}',
-                                                  values[group][metric][repres][info][0], epoch)
-                            except:
-                                pass
-                logger.add_scalar(f'{metric}/set/{repres}/labels',
-                                  values['set_batch_metrics'][metric][repres]['labels'][0], epoch)
-                logger.add_scalar(f'{metric}/set/{repres}/set',
-                                  values['set_batch_metrics'][metric][repres]['set'][0], epoch)
-                if metric != 'lisi':
-                    logger.add_scalar(f'F1_{metric}/set/{repres}',
-                                      batch_f1_score(
-                                          batch_score=values['set_batch_metrics'][metric][repres]['set'][0]/len(self.unique_labels),
-                                          class_score=values['set_batch_metrics'][metric][repres]['labels'][0]/len(self.plates),
-                                      ),
-                                      # values['set_batch_metrics'][metric][repres]['set'][0],
-                                      epoch)
-                else:
-                    logger.add_scalar(f'F1_{metric}/set/{repres}',
-                                      batch_f1_score(
-                                          batch_score=values['set_batch_metrics'][metric][repres]['set'][0]/len(self.unique_labels),
-                                          class_score=values['set_batch_metrics'][metric][repres]['labels'][0]/len(self.plates),
-                                      ),
-                                      # values['set_batch_metrics'][metric][repres]['set'][0],
-                                      epoch)
+        """
+        unique_labels = []
+        data = {}
+        for info in ['subs', 'inputs', 'names', 'labels', 'cats', 'batches']:
+            data[info] = {}
+            for group in ['all', 'all_pool', 'train', 'train_pool', 'valid', 'valid_pool', 'test', 'test_pool']:
+                data[info][group] = np.array([])
+        for group in ['train', 'test', 'valid']:
+            if group == 'valid' and not self.args.use_valid:
+                skf = StratifiedKFold(n_splits=5)
+                train_nums = np.arange(0, len(data['labels']['train']))
+                train_inds, valid_inds = skf.split(train_nums, data['labels']['train']).__next__()
+                data['inputs']['train'], data['inputs']['valid'] = data['inputs']['train'].iloc[train_inds], \
+                                                                   data['inputs']['train'].iloc[valid_inds]
+                data['labels']['train'], data['labels']['valid'] = data['labels']['train'][train_inds], \
+                                                                   data['labels']['train'][valid_inds]
+                data['names']['train'], data['names']['valid'] = data['names']['train'].iloc[train_inds], \
+                                                                 data['names']['train'].iloc[valid_inds]
+                data['batches']['train'], data['batches']['valid'] = data['batches']['train'][train_inds], \
+                                                                     data['batches']['train'][valid_inds]
+                data['cats']['train'], data['cats']['valid'] = data['cats']['train'][train_inds], data['cats']['train'][
+                    valid_inds]
+                subcategories = np.unique(
+                    ['v' for x in data['names'][group]])
+                subcategories = np.array([x for x in subcategories if x != ''])
+                data['subs'][group] = {x: np.array([]) for x in subcategories}
+                for sub in list(data['subs'][group]):
+                    data['subs']['train'][sub], data['subs']['valid'][sub] = data['subs']['train'][sub][train_inds], \
+                                                                             data['subs']['train'][sub][valid_inds]
 
-                for group in ['train', 'valid', 'test']:
-                    if metric == 'lisi':
-                        try:
-                            logger.add_scalar(f'F1_{metric}/{group}/{repres}',
-                                              batch_f1_score(
-                                                  batch_score=values[group][metric][repres]['domains'][0][0]/len(self.plates),
-                                                  class_score=values[group][metric][repres]['labels'][0][0]/len(self.unique_labels),
-                                              ),
-                                              epoch)
-                        except:
-                            logger.add_scalar(f'F1_{metric}/{group}/{repres}',
-                                              batch_f1_score(
-                                                  batch_score=values[group][metric][repres]['domains'][0]/len(self.plates),
-                                                  class_score=values[group][metric][repres]['labels'][0]/len(self.unique_labels),
-                                              ),
-                                              epoch)
+            if group == 'test' and not self.args.use_test:
+                skf = StratifiedKFold(n_splits=5)
+                train_nums = np.arange(0, len(data['labels']['train']))
+                train_inds, test_inds = skf.split(train_nums, data['labels']['train']).__next__()
+                data['inputs']['train'], data['inputs']['test'] = data['inputs']['train'].iloc[train_inds], \
+                                                                  data['inputs']['train'].iloc[test_inds]
+                data['names']['train'], data['names']['test'] = data['names']['train'].iloc[train_inds], \
+                                                                data['names']['train'].iloc[test_inds]
+                data['labels']['train'], data['labels']['test'] = data['labels']['train'][train_inds], \
+                                                                  data['labels']['train'][test_inds]
+                data['batches']['train'], data['batches']['test'] = data['batches']['train'][train_inds], \
+                                                                    data['batches']['train'][test_inds]
+                data['cats']['train'], data['cats']['test'] = \
+                    data['cats']['train'][train_inds], data['cats']['train'][test_inds]
+                subcategories = np.unique(
+                    ['v' for x in data['names'][group]])
+                subcategories = np.array([x for x in subcategories if x != ''])
+                data['subs'][group] = {x: np.array([]) for x in subcategories}
+                for sub in list(data['subs'][group]):
+                    data['subs']['train'][sub], data['subs']['test'][sub] = data['subs']['train'][sub][train_inds], \
+                                                                            data['subs']['train'][sub][test_inds]
 
-                    elif metric == 'silhouette':
-                        logger.add_scalar(f'F1_{metric}/{group}/{repres}',
-                                          batch_f1_score(
-                                              batch_score=values[group][metric][repres]['domains'][0],
-                                              class_score=values[group][metric][repres]['labels'][0],
-                                          ),
-                                          epoch)
-                    elif metric == 'kbet':
-                        try:
-                            logger.add_scalar(f'F1_{metric}/{group}/{repres}',
-                                              batch_f1_score(
-                                                  batch_score=values[group][metric][repres]['domains'][0],
-                                                  class_score=values[group][metric][repres]['labels'][0],
-                                              ),
-                                              epoch)
-                        except:
-                            pass
+            else:
+                data['inputs'][group] = pd.read_csv(
+                    f"{csvs_path}/{group}_inputs.csv"
+                )
+                data['names'][group] = data['inputs'][group]['ID']
+                data['labels'][group] = np.array([d.split('_')[1] for d in data['names'][group]])
+                unique_labels = get_unique_labels(data['labels'][group])
+                # data['batches'][group] = np.array([int(d.split('_')[0]) for d in data['names'][group]])
+                try:
+                    data['batches'][group] = np.array([int(d.split('_')[2].split('p')[1]) for d in data['names'][group]])
+                except:
+                    data['batches'][group] = np.array([int(d.split('_')[0]) for d in data['names'][group]])
 
-        for repres in ['enc', 'rec', 'inputs']:
-            for metric in ['adjusted_rand_score', 'adjusted_mutual_info_score']:
-                for group in ['train', 'valid', 'test']:
-                    for info in ['labels', 'domains']:
-                        logger.add_scalar(f'{metric}/{group}/{repres}/{info}', values[group][metric][repres][info][0], epoch)
-                    logger.add_scalar(f'F1_{metric}/{group}/{repres}',
-                                      batch_f1_score(
-                                          batch_score=values[group][metric][repres]['domains'][0],
-                                          class_score=values[group][metric][repres]['labels'][0],
-                                      ),
-                                      epoch)
+                # Drops the ID column
+                data['inputs'][group] = data['inputs'][group].iloc[:, 1:]
+                data['cats'][group] = np.array(
+                    [np.where(x == unique_labels)[0][0] for i, x in enumerate(data['labels'][group])])
+                subcategories = np.unique(
+                    ['v' for x in data['names'][group]])
+                subcategories = np.array([x for x in subcategories if x != ''])
+                data['subs'][group] = {x: np.array([]) for x in subcategories}
+                for sub in subcategories:
+                    data['subs'][group][sub] = np.array(
+                        [i for i, x in
+                         enumerate(data['names'][group])]
+                    )
 
-                # try:
-                #     logger.add_scalar(f'{metric}/{group}/{info}', values['set_batch_metrics'][metric]['labels'][0], epoch)
-                #     logger.add_scalar(f'{metric}/{group}/{info}', values['set_batch_metrics'][metric]['set'][0], epoch)
-                # except:
-                #     print('There is nothing in array')
+                # TODO this should not be necessary
+                if group != 'train':
+                    data['inputs'][group] = data['inputs'][group].loc[:, data['inputs']['train'].columns]
 
-        clusters = ['labels', 'domains']
-        reps = ['enc', 'rec']
-        train_lisi_enc = [values['train']['lisi']['enc'][c][0].reshape(-1) for c in clusters]
-        train_lisi_rec = [values['train']['lisi']['rec'][c][0].reshape(-1) for c in clusters]
-        valid_lisi_enc = [values['valid']['lisi']['enc'][c][0].reshape(-1) for c in clusters]
-        valid_lisi_rec = [values['valid']['lisi']['rec'][c][0].reshape(-1) for c in clusters]
-        test_lisi_enc = [values['test']['lisi']['enc'][c][0].reshape(-1) for c in clusters]
-        test_lisi_rec = [values['test']['lisi']['rec'][c][0].reshape(-1) for c in clusters]
-
-        set_lisi_enc = [values['set_batch_metrics']['lisi']['enc'][c][0].reshape(-1) for c in ['labels', 'set']]
-        set_lisi_rec = [values['set_batch_metrics']['lisi']['rec'][c][0].reshape(-1) for c in ['labels', 'set']]
-
-        lisi_df_sets = pd.DataFrame(np.concatenate((
-            np.concatenate((np.concatenate(set_lisi_enc), np.concatenate(set_lisi_rec))).reshape(1, -1),
-            np.array(['enc', 'enc', 'rec', 'rec']).reshape(1, -1),
-        ), 0).T, columns=['lisi', 'representation'])
-
-        lisi_df_sets['lisi'] = pd.to_numeric(lisi_df_sets['lisi'])
-        sns.set_theme(style="whitegrid")
-        figure = plt.figure(figsize=(8, 8))
-        ax = sns.boxplot(x="representation", y="lisi", data=lisi_df_sets)
-        logger_images.add_figure(f"LISI_sets", figure, epoch)
-
-        lisi_set_train_enc = np.concatenate(
-            [np.array([s for _ in values]) for s, values in zip(clusters, train_lisi_enc)]
+        subcategories = np.unique(
+            np.concatenate(
+                [np.unique(
+                    ['v' for x in data['names'][group]]) for group in
+                    list(data['names'].keys())
+                ]
+            )
         )
-        lisi_set_train_rec = np.concatenate(
-            [np.array([s for _ in values]) for s, values in zip(clusters, train_lisi_rec)]
-        )
-        lisi_train_reps = np.concatenate(
-            [np.array([r for _ in np.concatenate(values)]) for r, values in zip(reps, [train_lisi_enc, train_lisi_rec])]
-        )
-        lisi_set_valid_enc = np.concatenate(
-            [np.array([s for _ in values]) for s, values in zip(clusters, valid_lisi_enc)]
-        )
-        lisi_set_valid_rec = np.concatenate(
-            [np.array([s for _ in values]) for s, values in zip(clusters, valid_lisi_rec)]
-        )
-        lisi_valid_reps = np.concatenate(
-            [np.array([r for _ in np.concatenate(values)]) for r, values in zip(reps, [valid_lisi_enc, valid_lisi_rec])]
-        )
-        lisi_set_test_enc = np.concatenate(
-            [np.array([s for _ in values]) for s, values in zip(clusters, test_lisi_enc)]
-        )
-        lisi_set_test_rec = np.concatenate(
-            [np.array([s for _ in values]) for s, values in zip(clusters, test_lisi_rec)]
-        )
-        lisi_test_reps = np.concatenate(
-            [np.array([r for _ in np.concatenate(values)]) for r, values in zip(reps, [test_lisi_enc, test_lisi_rec])]
-        )
-        lisi_df_train = pd.DataFrame(np.concatenate((
-            np.concatenate((np.concatenate(train_lisi_enc), np.concatenate(train_lisi_rec))).reshape(1, -1),
-            lisi_train_reps.reshape(1, -1),
-            np.concatenate((lisi_set_train_enc, lisi_set_train_rec)).reshape(1, -1),
-        ), 0).T, columns=['lisi', 'representation', 'set'])
-        lisi_df_train['lisi'] = pd.to_numeric(lisi_df_train['lisi'])
-        lisi_df_valid = pd.DataFrame(np.concatenate((
-            np.concatenate((valid_lisi_enc, valid_lisi_rec)).reshape(1, -1),
-            lisi_valid_reps.reshape(1, -1),
-            np.concatenate((lisi_set_valid_enc, lisi_set_valid_rec)).reshape(1, -1),
-        ), 0).T, columns=['lisi', 'representation', 'set'])
-        lisi_df_valid['lisi'] = pd.to_numeric(lisi_df_valid['lisi'])
-        lisi_df_test = pd.DataFrame(np.concatenate((
-            np.concatenate((test_lisi_enc, test_lisi_rec)).reshape(1, -1),
-            lisi_test_reps.reshape(1, -1),
-            np.concatenate((lisi_set_test_enc, lisi_set_test_rec)).reshape(1, -1),
-        ), 0).T, columns=['lisi', 'representation', 'set'])
-        lisi_df_test['lisi'] = pd.to_numeric(lisi_df_test['lisi'])
-        # lisi_means = [values[s]['lisi'][0] for s in ['train', 'valid', 'test']]
+        subcategories = np.array([x for x in subcategories if x != ''])
+        self.subcategories = subcategories
+        for key in list(data.keys()):
+            if key == 'inputs':
+                data[key]['all'] = pd.concat((data[key]['train'], data[key]['valid'], data[key]['test']), 0)
+            elif key != 'subs':
+                data[key]['all'] = np.concatenate((data[key]['train'], data[key]['valid'], data[key]['test']), 0)
 
-        sns.set_theme(style="whitegrid")
-        figure = plt.figure(figsize=(8, 8))
-        ax = sns.boxplot(x="set", y="lisi", hue='representation', data=lisi_df_train)
-        logger_images.add_figure(f"LISI_train", figure, epoch)
+        # Add values for sets without a subset
+        for s in subcategories:
+            for group in ['train', 'valid', 'test']:
+                if s not in list(data['subs'][group].keys()):
+                    data['subs'][group][s] = np.array([-1 for _ in range(len(data['cats'][group]))])
 
-        figure = plt.figure(figsize=(8, 8))
-        ax = sns.boxplot(x="set", y="lisi", hue='representation', data=lisi_df_valid)
-        logger_images.add_figure(f"LISI_valid", figure, epoch)
+        data['subs']['all'] = {sub: np.concatenate(
+            (data['subs']['train'][sub], data['subs']['valid'][sub], data['subs']['test'][sub]), 0) for sub in
+            subcategories}
+        unique_batches = np.unique(data['batches']['all'])
+        for group in ['train', 'valid', 'test', 'all']:
+            data['batches'][group] = np.array([np.argwhere(unique_batches == x)[0][0] for x in data['batches'][group]])
 
-        figure = plt.figure(figsize=(8, 8))
-        ax = sns.boxplot(x="set", y="lisi", hue='representation', data=lisi_df_test)
-        logger_images.add_figure(f"LISI_test", figure, epoch)
-        sns.set_theme(style="white")
-        log_confusion_matrix(logger_images, epoch,
-                             lists,
-                             self.unique_labels, traces)
-        # save_roc_curve(classifier,
-        #                torch.Tensor(np.concatenate(lists['train']['encoded_values'])).to(device),
-        #                np.concatenate(lists['train']['classes']),
-        #                self.unique_labels, name='./roc_train', binary=self.bout, epoch=epoch,
-        #                acc=values['train']['acc'][-1], logger=logger_images)
-        save_roc_curve(classifier,
-                       torch.Tensor(np.concatenate(lists['valid']['encoded_values'])).to(device),
-                       np.concatenate(lists['valid']['classes']),
-                       self.unique_labels, name='./roc_valid', binary=self.bout, epoch=epoch,
-                       acc=values['valid']['acc'][-1], logger=logger_images)
-        save_roc_curve(classifier,
-                       torch.Tensor(np.concatenate(lists['test']['encoded_values'])).to(device),
-                       np.concatenate(lists['test']['classes']),
-                       self.unique_labels, name='./roc_test', binary=self.bout, epoch=epoch,
-                       acc=values['test']['acc'][-1], logger=logger_images)
-        # save_precision_recall_curve(classifier,
-        #                             torch.Tensor(np.concatenate(lists['train']['encoded_values'])).to(
-        #                                 device),
-        #                             np.concatenate(lists['train']['classes']),
-        #                             self.unique_labels, name='./prc_train', binary=self.bout, epoch=epoch,
-        #                             acc=values['train']['acc'][-1], logger=logger_cm)
-        save_precision_recall_curve(classifier,
-                                    torch.Tensor(np.concatenate(lists['valid']['encoded_values'])).to(
-                                        device),
-                                    np.concatenate(lists['valid']['classes']),
-                                    self.unique_labels, name='./prc_valid', binary=self.bout, epoch=epoch,
-                                    acc=values['valid']['acc'][-1], logger=logger_images)
-        save_precision_recall_curve(classifier,
-                                    torch.Tensor(np.concatenate(lists['test']['encoded_values'])).to(
-                                        device),
-                                    np.concatenate(lists['test']['classes']),
-                                    self.unique_labels, name='./prc_test', binary=self.bout, epoch=epoch,
-                                    acc=values['test']['acc'][-1], logger=logger_images)
-        for labs in ['domains', 'labels']:
-            unique_labels = np.unique(np.concatenate((np.concatenate(lists['train'][labs]),
-                                                      np.concatenate(lists['valid'][labs]),
-                                                      np.concatenate(lists['test'][labs]))))
-            log_CCA({'model': CCA(n_components=2), 'name': f'CCA_encs_{labs}'}, logger_images,
-                    np.concatenate(lists['train']['encoded_values']),
-                    np.concatenate(lists['valid']['encoded_values']),
-                    np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch)
-            log_ORD({'model': PCA(n_components=2), 'name': f'PCA_encs_{labs}'}, logger_images,
-                    np.concatenate(lists['train']['encoded_values']),
-                    np.concatenate(lists['valid']['encoded_values']),
-                    np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch)
-            log_ORD({'model': PCA(n_components=2), 'name': f'PCA_encs_{labs}_transductive'}, logger_images,
-                    np.concatenate(lists['train']['encoded_values']),
-                    np.concatenate(lists['valid']['encoded_values']),
-                    np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch, transductive=True)
-            log_TSNE(logger_images, f'TSNE_encs_{labs}', np.concatenate(lists['train']['encoded_values']),
-                     np.concatenate(lists['valid']['encoded_values']),
-                     np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train'][labs]),
-                     np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                     unique_labels, epoch)
-            log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': f'UMAP_encs_{labs}'},
-                    logger_images, np.concatenate(lists['train']['encoded_values']),
-                    np.concatenate(lists['valid']['encoded_values']),
-                    np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch, transductive=True)
-            log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': f'UMAP_encs_{labs}'},
-                    logger_images, np.concatenate(lists['train']['encoded_values']),
-                    np.concatenate(lists['valid']['encoded_values']),
-                    np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch)
-            log_CCA({'model': CCA(n_components=2), 'name': f'CCA_recs_{labs}'}, logger_images,
-                    np.concatenate(lists['train']['rec_values']),
-                    np.concatenate(lists['valid']['rec_values']), np.concatenate(lists['test']['rec_values']),
-                    np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch)
-            log_ORD({'model': PCA(n_components=2), 'name': f'PCA_recs_{labs}'}, logger_images,
-                    np.concatenate(lists['train']['rec_values']),
-                    np.concatenate(lists['valid']['rec_values']), np.concatenate(lists['test']['rec_values']),
-                    np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch)
-            log_ORD({'model': PCA(n_components=2), 'name': f'PCA_recs_{labs}_transductive'}, logger_images,
-                    np.concatenate(lists['train']['rec_values']),
-                    np.concatenate(lists['valid']['rec_values']), np.concatenate(lists['test']['rec_values']),
-                    np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch, transductive=True)
-            log_TSNE(logger_images, f'TSNE_recs_{labs}', np.concatenate(lists['train']['rec_values']),
-                     np.concatenate(lists['valid']['rec_values']),
-                     np.concatenate(lists['test']['rec_values']), np.concatenate(lists['train'][labs]),
-                     np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                     unique_labels, epoch)
-            log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': f'UMAP_recs_{labs}'},
-                    logger_images, np.concatenate(lists['train']['rec_values']),
-                    np.concatenate(lists['valid']['rec_values']),
-                    np.concatenate(lists['test']['rec_values']), np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch)
-            log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': f'UMAP_recs_{labs}_transductive'},
-                    logger_images, np.concatenate(lists['train']['rec_values']),
-                    np.concatenate(lists['valid']['rec_values']),
-                    np.concatenate(lists['test']['rec_values']), np.concatenate(lists['train'][labs]),
-                    np.concatenate(lists['valid'][labs]), np.concatenate(lists['test'][labs]),
-                    unique_labels, epoch, transductive=True)
+        self.data = data
+        self.unique_labels = unique_labels
+        self.unique_batches = unique_batches
 
-        # log_CCA({'model': CCA(n_components=2), 'name': f'CCA_encs_set'}, logger_images,
-        #         np.concatenate(lists['train']['encoded_values']),
-        #         np.concatenate(lists['valid']['encoded_values']),
-        #         np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train']['set']),
-        #         np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-        #         np.array(['train', 'valid', 'test']), epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': f'PCA_encs_set'}, logger_images,
-                np.concatenate(lists['train']['encoded_values']),
-                np.concatenate(lists['valid']['encoded_values']),
-                np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train']['set']),
-                np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                np.array(['train', 'valid', 'test']), epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': f'PCA_encs_set_transductive'}, logger_images,
-                np.concatenate(lists['train']['encoded_values']),
-                np.concatenate(lists['valid']['encoded_values']),
-                np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train']['set']),
-                np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                np.array(['train', 'valid', 'test']), epoch, transductive=True)
-        log_TSNE(logger_images, f'TSNE_encs_set', np.concatenate(lists['train']['encoded_values']),
-                 np.concatenate(lists['valid']['encoded_values']),
-                 np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train']['set']),
-                 np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                 np.array(['train', 'valid', 'test']), epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': f'UMAP_encs_set'},
-                logger_images, np.concatenate(lists['train']['encoded_values']),
-                np.concatenate(lists['valid']['encoded_values']),
-                np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train']['set']),
-                np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                np.array(['train', 'valid', 'test']), epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': f'UMAP_encs_set_transductive'},
-                logger_images, np.concatenate(lists['train']['encoded_values']),
-                np.concatenate(lists['valid']['encoded_values']),
-                np.concatenate(lists['test']['encoded_values']), np.concatenate(lists['train']['set']),
-                np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                np.array(['train', 'valid', 'test']), epoch, transductive=True)
-        log_ORD({'model': PCA(n_components=2), 'name': f'PCA_recs_set'}, logger_images,
-                np.concatenate(lists['train']['rec_values']),
-                np.concatenate(lists['valid']['rec_values']), np.concatenate(lists['test']['rec_values']),
-                np.concatenate(lists['train']['set']),
-                np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                np.array(['train', 'valid', 'test']), epoch)
-        # log_CCA({'model': CCA(n_components=2), 'name': f'CCA_recs_set'}, logger_images,
-        #         np.concatenate(lists['train']['rec_values']),
-        #         np.concatenate(lists['valid']['rec_values']), np.concatenate(lists['test']['rec_values']),
-        #         np.concatenate(lists['train']['set']),
-        #         np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-        #         np.array(['train', 'valid', 'test']), epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': f'PCA_recs_set_transductive'}, logger_images,
-                np.concatenate(lists['train']['rec_values']),
-                np.concatenate(lists['valid']['rec_values']), np.concatenate(lists['test']['rec_values']),
-                np.concatenate(lists['train']['set']),
-                np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                np.array(['train', 'valid', 'test']), epoch, transductive=True)
-        log_TSNE(logger_images, f'TSNE_recs_set', np.concatenate(lists['train']['rec_values']),
-                 np.concatenate(lists['valid']['rec_values']),
-                 np.concatenate(lists['test']['rec_values']), np.concatenate(lists['train']['set']),
-                 np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                 np.array(['train', 'valid', 'test']), epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': f'UMAP_recs_set'},
-                logger_images, np.concatenate(lists['train']['rec_values']),
-                np.concatenate(lists['valid']['rec_values']),
-                np.concatenate(lists['test']['rec_values']), np.concatenate(lists['train']['set']),
-                np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                np.array(['train', 'valid', 'test']), epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': f'UMAP_recs_set_transductive'},
-                logger_images, np.concatenate(lists['train']['rec_values']),
-                np.concatenate(lists['valid']['rec_values']),
-                np.concatenate(lists['test']['rec_values']), np.concatenate(lists['train']['set']),
-                np.concatenate(lists['valid']['set']), np.concatenate(lists['test']['set']),
-                np.array(['train', 'valid', 'test']), epoch, transductive=True)
+    def keep_good_features(self, thres):
+        """
+        All dataframes have a shape of N samples (rows) x M features (columns)
+        Args:
+            thres: Ratio of 0s tolerated. Features with ratios > thres are removed
 
-    def keep_good_features(self, thres, data, train_data, valid_data, test_data):
+        Returns:
+        A dictionary of pandas datasets with keys:
+            'all': Pandas dataframe containing all data (train, valid and test data),
+            'train': Pandas dataframe containing the training data,
+            'valid': Pandas dataframe containing the validation data,
+            'test: Pandas dataframe containing the test data'
+        """
         if thres > 0:
             good_features = np.array(
-                [i for i in range(self.train_data.shape[1]) if
-                 sum(self.train_data.iloc[:, i] != 0) > int(self.train_data.shape[0] * thres)])
-            print(f'{data.shape[1] - len(good_features)} features were < {thres} 0s')
+                [i for i in range(self.data['inputs']['all'].shape[1]) if
+                 sum(self.data['inputs']['all'].iloc[:, i] != 0) > int(self.data['inputs']['all'].shape[0] * thres)])
+            print(f"{self.data['inputs']['all'].shape[1] - len(good_features)} features were < {thres} 0s")
 
-            data = data.iloc[:, good_features]
-            train_data = train_data.iloc[:, good_features]
-            valid_data = valid_data.iloc[:, good_features]
-            test_data = test_data.iloc[:, good_features]
+            data = self.data['inputs']['all'].iloc[:, good_features]
+            train_data = self.data['inputs']['train'].iloc[:, good_features]
+            valid_data = self.data['inputs']['valid'].iloc[:, good_features]
+            test_data = self.data['inputs']['test'].iloc[:, good_features]
         elif thres < 0 or thres >= 1:
             exit('thres value should be: 0 <= thres < 1 ')
+        else:
+            data = self.data['inputs']['all'].iloc[:]
+            train_data = self.data['inputs']['train'].iloc[:]
+            valid_data = self.data['inputs']['valid'].iloc[:]
+            test_data = self.data['inputs']['test'].iloc[:]
 
-        return data, train_data, valid_data, test_data
-
-    def log_input_ordination(self, logger, train_data, valid_data, test_data, epoch):
-        log_CCA({'model': CCA(n_components=2), 'name': 'CCA_inputs_classes'}, logger, train_data, valid_data,
-                test_data, self.train_labels, self.valid_labels, self.test_labels, self.unique_labels, epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': 'PCA_inputs_classes'}, logger, train_data, valid_data,
-                test_data, self.train_labels, self.valid_labels, self.test_labels, self.unique_labels, epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': 'PCA_inputs_classes_transductive'}, logger, train_data, valid_data,
-                test_data, self.train_labels, self.valid_labels, self.test_labels, self.unique_labels, epoch, transductive=True)
-        log_TSNE(logger, 'TSNE_inputs_classes', train_data, valid_data, test_data, self.train_labels, self.valid_labels,
-                 self.test_labels, self.unique_labels, epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': 'UMAP_inputs_classes'},
-                logger, train_data, valid_data, test_data, self.train_labels, self.valid_labels,
-                self.test_labels, self.unique_labels, epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': 'UMAP_inputs_classes_transductive'},
-                logger, train_data, valid_data, test_data, self.train_labels, self.valid_labels,
-                self.test_labels, self.unique_labels, epoch, transductive=True)
-        unique_plates = np.unique(
-            np.concatenate((self.train_plates, self.valid_plates, self.test_plates)))
-
-        log_CCA({'model': CCA(n_components=2), 'name': 'CCA_inputs_plates'}, logger, train_data, valid_data,
-                test_data, self.train_plates, self.valid_plates, self.test_plates, unique_plates, epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': 'PCA_inputs_plates'}, logger, train_data, valid_data,
-                test_data, self.train_plates, self.valid_plates, self.test_plates, unique_plates, epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': 'PCA_inputs_plates_transductive'}, logger, train_data, valid_data,
-                test_data, self.train_plates, self.valid_plates, self.test_plates, unique_plates, epoch, transductive=True)
-        log_TSNE(logger, 'TSNE_inputs_plates', train_data, valid_data, test_data, self.train_plates, self.valid_plates,
-                 self.test_plates, unique_plates, epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': 'UMAP_inputs_plates'},
-                logger, train_data, valid_data, test_data, self.train_plates, self.valid_plates,
-                self.test_plates, unique_plates, epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': 'UMAP_inputs_plates_transductive'},
-                logger, train_data, valid_data, test_data, self.train_plates, self.valid_plates,
-                self.test_plates, unique_plates, epoch, transductive=True)
-
-        unique_plates = np.unique(
-            np.concatenate((self.train_plates, self.valid_plates, self.test_plates)))
-
-        train_sets = ['train' for _ in self.train_plates]
-        valid_sets = ['valid' for _ in self.valid_plates]
-        test_sets = ['test' for _ in self.test_plates]
-        unique_sets = np.array(['train', 'valid', 'test'])
-
-        # Can't do CCA because train_sets only has a single class
-        # log_CCA({'model': CCA(n_components=2), 'name': 'CCA_inputs_sets'}, logger, train_data, valid_data, test_data,
-        #         train_sets, valid_sets, test_sets, unique_sets, epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': 'PCA_inputs_sets'}, logger, train_data, valid_data,
-                test_data, train_sets, valid_sets, test_sets, unique_sets, epoch)
-        log_ORD({'model': PCA(n_components=2), 'name': 'PCA_inputs_sets_transductive'}, logger, train_data, valid_data,
-                test_data, train_sets, valid_sets, test_sets, unique_sets, epoch, transductive=True)
-        log_TSNE(logger, 'TSNE_inputs_sets', train_data, valid_data, test_data, train_sets, valid_sets,
-                 test_sets, unique_sets, epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': 'UMAP_inputs_sets'},
-                logger, train_data, valid_data, test_data, train_sets, valid_sets, test_sets, unique_sets, epoch)
-        log_ORD({'model': UMAP(n_neighbors=5, min_dist=0.3, metric='correlation'), 'name': 'UMAP_inputs_sets_transductive'},
-                logger, train_data, valid_data, test_data, train_sets, valid_sets, test_sets, unique_sets, epoch, transductive=True)
+        return {'all': data, 'train': train_data, 'valid': valid_data, 'test': test_data}
 
     def get_losses(self, scale, smooth, margin):
+        """
+        Getter for the losses.
+        Args:
+            scale: Scaler that was used, e.g. normalizer or binarize
+            smooth: Parameter for label_smoothing
+            margin: Parameter for the TripletMarginLoss
+
+        Returns:
+            sceloss: CrossEntropyLoss (with label smoothing)
+            celoss: CrossEntropyLoss object (without label smoothing)
+            mseloss: MSELoss object
+            triplet_loss: TripletMarginLoss object
+        """
         sceloss = nn.CrossEntropyLoss(label_smoothing=smooth)
         celoss = nn.CrossEntropyLoss()
-        if self.loss == 'mse':
+        if self.args.rec_loss == 'mse':
             mseloss = nn.MSELoss()
-        elif self.loss == 'l1':
+        elif self.args.rec_loss == 'l1':
             mseloss = nn.L1Loss()
         if scale == "binarize":
             mseloss = nn.BCELoss()
@@ -1484,78 +660,96 @@ class Train:
 
         return sceloss, celoss, mseloss, triplet_loss
 
-    def preprocess_params(self, mz_bin=0.2, rt_bin=20, spd=200, stride=0):
-        self.mz_bin = mz_bin
-        self.rt_bin = rt_bin
-        self.spd = spd
-        self.stride = stride
+    def freeze_layers(self, ae):
+        """
+        Freeze all layers except the classifier
+        Args:
+            ae:
 
+        Returns:
 
-def get_berm(berm):
-    # berm: batch effect removal method
-    if berm == 'combat':
-        berm = comBatR
-    if berm == 'harmony':
-        berm = harmonyR
-    if berm == 'none':
-        berm = None
-    return berm
+        """
+        if not self.args.train_after_warmup:
+            for param in ae.dec.parameters():
+                param.requires_grad = False
+            for param in ae.enc.parameters():
+                param.requires_grad = False
+            for param in ae.classifier.parameters():
+                param.requires_grad = True
+        return ae
 
+    @staticmethod
+    def get_mccs(lists, traces, subs):
+        for group in lists.keys():
+            preds, classes = np.concatenate(lists[group]['preds']).argmax(1), np.concatenate(
+                lists[group]['classes'])
+            traces[group]['mcc'] = MCC(preds, classes)
+            for k in subs:
+                inds = torch.concat(lists[group]['concs'][k]).detach().cpu().numpy()
+                inds = np.array([i for i, x in enumerate(inds) if x > -1])
+                if len(inds) > 0:
+                    traces[group][f'mcc_{k}'] = MCC(preds[inds], classes[inds])
+                else:
+                    traces[group][f'mcc_{k}'] = -1
 
-# TODO The plates of test samples are not correctly identified. Need a standardisation of file naming
-# The easiest solution would be to include the number of the plate in the sample name
-# {date}_{acquisitionType}_{samplesPerDay}_{bacteriumName}_{(concentration)+ID}_{plateNumber}  concentration is facultative
-# Example: 20220627_dia_200spd_eco_v04_p1, 20220627_blk_12_p3
+        return traces
+
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--path', type=str, default='../../resources')
     parser.add_argument('--batch_removal_method', type=str, default='none')
-    parser.add_argument('--inference_inputs', type=int, default=1)
-    # parser.add_argument('--threshold', type=float, default=0.99)
-    parser.add_argument('--combat', type=int, default=0)
     parser.add_argument('--random_recs', type=int, default=0)
     parser.add_argument('--predict_tests', type=int, default=0)
-    parser.add_argument('--tied_weights', type=int, default=1)
-    parser.add_argument('--variational', type=int, default=0)
-    parser.add_argument('--zinb', type=int, default=0)
-    parser.add_argument('--balanced_rec_loader', type=int, default=1)
-    parser.add_argument('--dann_sets', type=int, default=1)
+    parser.add_argument('--balanced_rec_loader', type=int, default=0)
+    parser.add_argument('--dann_sets', type=int, default=0)
     parser.add_argument('--dann_plates', type=int, default=0)
     parser.add_argument('--early_stop', type=int, default=100)
     parser.add_argument('--early_warmup_stop', type=int, default=100)
-    # TODO find better names to distinguish scale and scaler (scaler is the scaler used in preprocessing,
-    #  scale is the transformation that will be applied in this script)
-    parser.add_argument('--preprocess_scaler', type=str, default='none')
-    parser.add_argument('--scaler', type=str, default='robust')
-    parser.add_argument('--log2', type=str, default='inloop')
-    parser.add_argument('--plate', type=str, default='eco,sag,efa,kpn,blk,blk_p,pool')
-    parser.add_argument('--alpha_warmup', type=int, default=10000)
     parser.add_argument('--triplet_loss', type=int, default=1)
-    parser.add_argument('--mz_bin', type=float, default=0.2)
-    parser.add_argument('--rt_bin', type=int, default=20)
-    parser.add_argument('--spd', type=int, default=200)
-    parser.add_argument('--one_model', type=int, default=1)
+    parser.add_argument('--train_after_warmup', type=int, default=1)
     parser.add_argument('--warmup', type=int, default=1000)
     parser.add_argument('--n_epochs', type=int, default=10000)
-    parser.add_argument('--feature_selection', type=str, default='mutual_info_classif')
     parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--rec_loss', type=str, default='mse')
+    parser.add_argument('--tied_weights', type=int, default=1)
+    parser.add_argument('--variational', type=int, default=0)
+    parser.add_argument('--zinb', type=int, default=0)
+    parser.add_argument('--use_valid', type=int, default=0)
+    parser.add_argument('--use_test', type=int, default=0)
+
+    # These arguments are not used by the Train class
+    parser.add_argument('--path', type=str, default='../../resources/')
+    parser.add_argument('--experiment', type=str, default='20220706_Data_ML02/Data_FS')
+    parser.add_argument('--run_name', type=str, default='eco,sag,efa,kpn,blk,pool')
+    parser.add_argument('--feature_selection', type=str, default='mutual_info_classif')
+    parser.add_argument('--log2', type=str, default='inloop')
+    parser.add_argument('--preprocess_scaler', type=str, default='none')
+    parser.add_argument('--mz_bin', type=float, default=0.2)
+    parser.add_argument('--rt_bin', type=float, default=20.0)
+    parser.add_argument('--spd', type=int, default=200)
+    parser.add_argument('--shift', type=int, default=0)
+    parser.add_argument('--combat', type=int, default=0)
+
     args = parser.parse_args()
 
     device = args.device
+    log_path = f'logs/ae_classifier/{args.experiment}/valid{args.use_valid}/test{args.use_test}/spd{args.spd}/' \
+               f'combat{args.combat}/{args.run_name}/' \
+               f'tw{args.tied_weights}/taw{args.train_after_warmup}/' \
+               f'tl{args.triplet_loss}/pseudo{args.predict_tests}/vae{args.variational}/' \
+               f'zinb{args.zinb}/balanced{args.balanced_rec_loader}/' \
+               f'dannset{args.dann_sets}/loss{args.rec_loss}/' \
+               f'scale{args.preprocess_scaler}/log{args.log2}/'
 
-    train = Train(path=args.path, run_name=args.plate, prescaler=args.preprocess_scaler, log2=args.log2, combat=args.combat,
-                  n_epochs=args.n_epochs, scaler=args.scaler, warmup=args.warmup, tl=args.triplet_loss,
-                  alpha_warmup=args.alpha_warmup, random_recs=args.random_recs, one_model=args.one_model,
-                  early_stop=args.early_stop, loss='mse', inference_inputs=args.inference_inputs,
-                  balanced_rec_loader=args.balanced_rec_loader, train_after_warmup=0,
-                  tied_weights=args.tied_weights, variational=args.variational, zinb=args.zinb,
-                  predict_tests=args.predict_tests, features_selection=args.feature_selection,
-                  dann_sets=args.dann_sets, dann_plates=args.dann_plates, load_tb=True, berm=args.batch_removal_method)
-    train.preprocess_params(mz_bin=args.mz_bin, rt_bin=args.rt_bin, spd=args.spd, stride=0)
-    train.get_data(classif='all')
+    csvs_path = f"{args.path}/{args.experiment}/matrices/mz{args.mz_bin}/rt{args.rt_bin}/{args.spd}spd/"\
+                f"combat{args.combat}/shift{args.shift}/{args.preprocess_scaler}/"\
+                f"log{args.log2}/{args.feature_selection}/{args.run_name}/"
+
+    train = Train(args, log_path, fix_thres=-1, load_tb=True)
+
+    train.get_data(csvs_path)
     # train.train()
 
     best_parameters, values, experiment, model = optimize(
@@ -1580,7 +774,7 @@ if __name__ == "__main__":
         objective_name='loss',
         minimize=True,
         total_trials=250,
-        random_seed=42,
+        random_seed=4,
 
     )
 

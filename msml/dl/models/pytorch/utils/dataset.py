@@ -20,6 +20,8 @@ from sklearn.preprocessing import MinMaxScaler, RobustScaler, Normalizer, Standa
 from torch.autograd import Variable
 from torchvision import transforms
 from torchvision import transforms
+from torch.utils.data import DataLoader
+import torchvision
 
 random.seed(42)
 torch.manual_seed(42)
@@ -507,11 +509,9 @@ class MSDataset2(Dataset):
 
 
 class MSDataset3(Dataset):
-    def __init__(self, data, training=False, labels=None, batches=None, concs=None, transform=None, quantize=False,
+    def __init__(self, data, labels=None, batches=None, concs=None, transform=None, quantize=False,
                  remove_paddings=False, crop_size=-1, add_noise=False, random_recs=False, device='cuda'):
         self.random_recs = random_recs
-        device = device
-        self.training = training
         self.crop_size = crop_size
         self.samples = data
         self.add_noise = add_noise
@@ -525,10 +525,10 @@ class MSDataset3(Dataset):
         self.quantize = quantize
         self.remove_paddings = remove_paddings
         labels_inds = {label: [i for i, x in enumerate(labels) if x == label] for label in labels}
-        try:
-            self.labels_data = {label: data[labels_inds[label]] for label in labels}
-        except:
-            pass
+        # try:
+        self.labels_data = {label: data[labels_inds[label]] for label in labels}
+        # except:
+        #     print(labels)
         self.n_labels = {label: len(self.labels_data[label]) for label in labels}
 
     def __len__(self):
@@ -539,11 +539,12 @@ class MSDataset3(Dataset):
         if self.labels is not None:
             label = self.labels[idx]
             batch = self.batches[idx]
-            concs['lows'] = self.concs['lows'][idx]
-            concs['highs'] = self.concs['highs'][idx]
-            concs['vhighs'] = self.concs['vhighs'][idx]
-            if concs['vhighs'] != -1 and concs['highs'] != -1 and concs['lows'] != -1:
-                pass
+            for k in list(self.concs.keys()):
+                concs[k] = self.concs[k][idx]
+            # concs['highs'] = self.concs['highs'][idx]
+            # concs['vhighs'] = self.concs['vhighs'][idx]
+            # if concs['vhighs'] != -1 and concs['highs'] != -1 and concs['lows'] != -1:
+            #     pass
         else:
             label = None
         if self.random_recs:
@@ -762,7 +763,6 @@ def final_save_checkpoint(checkpoint_path, model, optimizer, name):
                checkpoint_path + '/' + name)
 
 
-
 def save_checkpoint(model,
                     optimizer,
                     # learning_rate,
@@ -822,3 +822,145 @@ class validation_spliter:
         self.dataset.samples = np.concatenate([self.dataset.samples[self.val_offset:], tmp], 0)
 
         return partial_dataset
+
+
+def get_loaders(data, inputs, random_recs, ae=None, classifier=None, device='cuda'):
+    """
+
+    Args:
+        data:
+        ae:
+        classifier:
+
+    Returns:
+
+    """
+    transform = torchvision.transforms.Compose([
+        torchvision.transforms.ToTensor(),
+        # torchvision.transforms.Normalize(all_data.mean(), all_data.std()),
+    ])
+
+    # TODO Change the order of dicts: set (train, valid or test) first, the, inputs, labels etc
+    train_set = MSDataset3(inputs['train'], data['cats']['train'],
+                           [x for x in data['batches']['train']], data['subs']['train'],
+                           transform=transform, crop_size=-1, random_recs=random_recs,
+                           quantize=False, device=device)
+    valid_set = MSDataset3(inputs['valid'], data['cats']['valid'],
+                           [x for x in data['batches']['valid']], data['subs']['valid'],
+                           transform=transform, crop_size=-1, random_recs=False,
+                           quantize=False, device=device)
+    valid_set2 = MSDataset3(inputs['valid'], data['cats']['valid'],
+                            [x for x in data['batches']['valid']], data['subs']['valid'],
+                            transform=transform, crop_size=-1, random_recs=random_recs,
+                            quantize=False, device=device)
+    test_set = MSDataset3(inputs['test'], data['cats']['test'],
+                          [x for x in data['batches']['test']], data['subs']['test'],
+                          transform=transform, crop_size=-1, random_recs=False,
+                          quantize=False, device=device)
+    test_set2 = MSDataset3(inputs['test'], data['cats']['test'],
+                           [x for x in data['batches']['test']], data['subs']['test'],
+                           transform=transform, crop_size=-1, random_recs=random_recs,
+                           quantize=False, device=device)
+
+    loaders = {
+        'train': DataLoader(train_set,
+                            num_workers=0,
+                            shuffle=True,
+                            batch_size=8,
+                            pin_memory=False,
+                            drop_last=True),
+
+        'test': DataLoader(test_set,
+                           num_workers=0,
+                           shuffle=False,
+                           batch_size=1,
+                           pin_memory=False,
+                           drop_last=False),
+        'valid': DataLoader(valid_set,
+                            num_workers=0,
+                            shuffle=False,
+                            batch_size=1,
+                            pin_memory=False,
+                            drop_last=False),
+        'test2': DataLoader(test_set2,
+                            num_workers=0,
+                            shuffle=False,
+                            batch_size=8,
+                            pin_memory=False,
+                            drop_last=True),
+        'valid2': DataLoader(valid_set2,
+                             num_workers=0,
+                             shuffle=False,
+                             batch_size=8,
+                             pin_memory=False,
+                             drop_last=True)
+    }
+    if ae is not None:
+        valid_cats = []
+        test_cats = []
+        ae.eval()
+        classifier.eval()
+        for i, batch in enumerate(loaders['valid']):
+            # optimizer_ae.zero_grad()
+            input, labels, domain, to_rec, not_to_rec, concs = batch
+            input[torch.isnan(input)] = 0
+            input = input.to(device).float()
+            enc, rec, _, kld = ae(input, None, 1, sampling=False)
+            preds = ae.classifier(enc)
+            domain_preds = ae.dann_discriminator(enc)
+            valid_cats += [preds.detach().cpu().numpy().argmax(1)]
+        for i, batch in enumerate(loaders['test']):
+            # optimizer_ae.zero_grad()
+            input, labels, domain, to_rec, not_to_rec, concs = batch
+            input[torch.isnan(input)] = 0
+            input = input.to(device).float()
+            # to_rec = to_rec.to(device).float()
+            enc, rec, _, kld = ae(input, None, 1, sampling=False)
+            # if self.one_model:
+            preds = ae.classifier(enc)
+            domain_preds = ae.dann_discriminator(enc)
+            # else:
+            #     preds = classifier(enc)
+            test_cats += [preds.detach().cpu().numpy().argmax(1)]
+
+        valid_set2 = MSDataset3(inputs['valid'], np.concatenate(valid_cats),
+                                [x for x in data['batches']['valid']], data['subs']['valid'],
+                                transform=transform, crop_size=-1, random_recs=random_recs,
+                                quantize=False, device=device)
+        test_set2 = MSDataset3(inputs['test'], np.concatenate(test_cats),
+                               [x for x in data['batches']['test']], data['subs']['test'],
+                               transform=transform, crop_size=-1, random_recs=random_recs,
+                               quantize=False, device=device)
+        loaders['valid2'] = DataLoader(valid_set2,
+                                       num_workers=0,
+                                       shuffle=True,
+                                       batch_size=8,
+                                       pin_memory=False,
+                                       drop_last=True)
+        loaders['test2'] = DataLoader(test_set2,
+                                      num_workers=0,
+                                      shuffle=True,
+                                      batch_size=8,
+                                      pin_memory=False,
+                                      drop_last=True)
+        all_cats = np.concatenate(
+            (data['cats']['train'], np.stack(valid_cats).reshape(-1), np.stack(test_cats).reshape(-1)))
+        all_set = MSDataset3(inputs['all'], all_cats, [x for x in data['batches']['all']],
+                             data['subs']['all'], transform=transform, crop_size=-1,
+                             random_recs=random_recs, quantize=False, device=device)
+
+    else:
+        all_set = MSDataset3(inputs['all'], data['cats']['all'], [x for x in data['batches']['all']],
+                             data['subs']['all'], transform=transform, crop_size=-1,
+                             random_recs=random_recs, quantize=False, device=device)
+
+    loaders['all'] = DataLoader(all_set,
+                                num_workers=0,
+                                shuffle=True,
+                                batch_size=8,
+                                pin_memory=False,
+                                drop_last=True)
+
+    return loaders
+
+

@@ -38,6 +38,10 @@ def np_dice_coef(y_true, y_pred):
     return (2. * np.sum(tr * pr) + smooth) / (np.sum(tr) + np.sum(pr) + smooth)
 
 
+def batch_f1_score(batch_score, class_score):
+    return 2 * (1 - batch_score) * (class_score) / (1 - batch_score + class_score)
+
+
 # matthews_correlation
 def matthews_correlation(y_true, y_pred):
     y_pred_pos = K.round(K.clip(y_pred, 0, 1))

@@ -4,6 +4,8 @@ from torch import nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.autograd import Function
+from msml.dl.utils.stochastic import GaussianSample
+from msml.dl.utils.distributions import log_normal_standard, log_normal_diag, log_gaussian
 
 
 # https://github.com/DHUDBlab/scDSC/blob/1247a63aac17bdfb9cd833e3dbe175c4c92c26be/layers.py#L43
@@ -39,124 +41,8 @@ class ReverseLayerF(Function):
         return output, None
 
 
-def to_categorical(y, num_classes, dtype=torch.int):
-    """ 1-hot encodes a tensor """
-    one_hot = torch.eye(num_classes, dtype=dtype)[y]
-    return one_hot
-
-
 def grad_reverse(x):
     return ReverseLayerF()(x)
-
-
-def log_standard_gaussian(x):
-    """
-    Evaluates the log pdf of a standard normal distribution at x.
-
-    :param x: point to evaluate
-    :return: log N(x|0,I)
-    """
-    return torch.sum(-0.5 * math.log(2 * math.pi) - x ** 2 / 2, dim=-1)
-
-
-def log_gaussian(x, mu, log_var):
-    """
-    Returns the log pdf of a normal distribution parametrised
-    by mu and log_var evaluated at x.
-
-    :param x: point to evaluate
-    :param mu: mean of distribution
-    :param log_var: log variance of distribution
-    :return: log N(x|µ,σ)
-    """
-    log_pdf = - 0.5 * torch.log(2 * torch.tensor(math.pi, requires_grad=True)) - log_var / 2 - (x - mu) ** 2 / (
-        2 * torch.exp(log_var))
-    return torch.sum(log_pdf, dim=-1)
-
-
-def log_Normal_diag(x, mean, log_var, average=False, dim=1):
-    log_normal = -0.5 * (log_var + torch.pow(x - mean, 2) / torch.exp(log_var))
-    if average:
-        return torch.mean(log_normal, dim)
-    else:
-        return torch.sum(log_normal, dim)
-
-
-def log_Normal_standard(x, average=False, dim=1):
-    log_normal = -0.5 * torch.pow(x, 2)
-    if average:
-        return torch.mean(log_normal, dim)
-    else:
-        return torch.sum(log_normal, dim)
-
-
-def count_labels(arr):
-    """
-    Counts elements in array
-
-    :param arr:
-    :return:
-    """
-    elements_count = {}
-    for element in arr:
-        if element in elements_count:
-            elements_count[element] += 1
-        else:
-            elements_count[element] = 1
-    to_remove = []
-    for key, value in elements_count.items():
-        print(f"{key}: {value}")
-        if value <= 2:
-            to_remove += [key]
-
-    return to_remove
-
-
-class Stochastic(nn.Module):
-    """
-    Base stochastic layer that uses the
-    reparametrization trick [Kingma 2013]
-    to draw a sample from a distribution
-    parametrised by mu and log_var.
-    """
-
-    def reparametrize(self, mu, log_var, train, beta=0):
-        if train:
-            epsilon = Variable(beta * torch.randn(mu.size()), requires_grad=False)
-        else:
-            epsilon = Variable(torch.zeros_like(mu), requires_grad=False)
-
-        if mu.is_cuda:
-            epsilon = epsilon.cuda()
-
-        # log_std = 0.5 * log_var
-        # std = exp(log_std)
-        std = log_var.mul(0.5).exp_()
-
-        z = std * epsilon + mu
-        # z = mu.addcmul(std, epsilon)
-
-        return z
-
-
-class GaussianSample(Stochastic):
-    """
-    Layer that represents a sample from a
-    Gaussian distribution.
-    """
-
-    def __init__(self, in_features, out_features):
-        super(GaussianSample, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.mu = nn.Linear(in_features, out_features)
-        self.log_var = nn.Linear(in_features, out_features)
-
-    def forward(self, x, train=False, beta=1.0):
-        mu = self.mu(x)
-        log_var = F.softplus(self.log_var(x))
-
-        return self.reparametrize(mu, log_var, train, beta), mu, log_var
 
 
 class Classifier(nn.Module):
@@ -186,36 +72,6 @@ class Classifier(nn.Module):
 
     def predict(self, x):
         return self.linear2(x).argmax(1).detach().cpu().numpy()
-
-
-class Classifier2(nn.Module):
-    def __init__(self, in_shape=64, out_shape=9, dropout=0.):
-        super(Classifier2, self).__init__()
-        self.linear1 = nn.Sequential(
-            nn.Linear(in_shape, 128),
-            nn.BatchNorm1d(128),
-            nn.Dropout(dropout),
-            nn.ReLU(),
-        )
-        self.linear2 = nn.Sequential(
-            nn.Linear(128, out_shape),
-        )
-        self.random_init()
-
-    def forward(self, x):
-        x = self.linear1(x)
-        x = self.linear2(x)
-        return x
-
-    def random_init(self, init_func=nn.init.kaiming_uniform_):
-        for m in self.modules():
-            if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-                init_func(m.weight.data)
-                if m.bias is not None:
-                    m.bias.data.zero_()
-            if isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 0.975)
-                nn.init.constant_(m.bias, 0.125)
 
 
 class Encoder(nn.Module):
@@ -395,9 +251,9 @@ class AutoEncoder(nn.Module):
         # vanilla
         else:
             (mu, log_var) = q_param
-            qz = log_Normal_diag(z, mu, log_var)
+            qz = log_normal_diag(z, mu, log_var)
         if p_param is None:
-            pz = log_Normal_standard(z)
+            pz = log_normal_standard(z)
         else:
             (mu, log_var) = p_param
             pz = log_gaussian(z, mu, log_var)

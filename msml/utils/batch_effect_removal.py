@@ -67,3 +67,46 @@ def scMergeR(data, batches, classes=NULL, par_prior=True, ref_batch=NULL):
         newdata = np.array(robjects.conversion.rpy2py(newdata))
     return newdata
 
+
+def remove_batch_effect(berm, all_data, train_data, valid_data, test_data, all_batches):
+    """
+    All dataframes have a shape of N samples (rows) x M features (columns)
+
+    Args:
+        berm: Batch effect removal method
+        all_data:
+        train_data:
+        valid_data:
+        test_data:
+        all_batches:
+
+    Returns:
+        Returns:
+        A dictionary of pandas datasets with keys:
+            'all': Pandas dataframe containing all data (train, valid and test data),
+            'train': Pandas dataframe containing the training data,
+            'valid': Pandas dataframe containing the validation data,
+            'test: Pandas dataframe containing the test data'
+
+    """
+    if berm is not None:
+        df = pd.DataFrame(all_data)
+        # df[df.isna()] = 0
+        all_data = berm(df, all_batches)
+        train_data = all_data[:train_data.shape[0]]
+        valid_data = all_data[train_data.shape[0]:train_data.shape[0] + valid_data.shape[0]]
+        test_data = all_data[train_data.shape[0] + valid_data.shape[0]:]
+
+    return {'all': all_data, 'train': train_data, 'valid': valid_data, 'test': test_data}
+
+
+def get_berm(berm):
+    # berm: batch effect removal method
+    if berm == 'combat':
+        berm = comBatR
+    if berm == 'harmony':
+        berm = harmonyR
+    if berm == 'none':
+        berm = None
+    return berm
+

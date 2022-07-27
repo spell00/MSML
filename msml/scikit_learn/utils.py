@@ -24,6 +24,9 @@ from sklearn.preprocessing import MaxAbsScaler, MinMaxScaler, RobustScaler, Norm
     PowerTransformer, QuantileTransformer, PolynomialFeatures, Binarizer
 from sklearn.pipeline import Pipeline
 
+from msml.utils.utils import get_unique_labels
+
+
 def drop_lows(train_data):
     """
     Drops samples that have low concentrations from the data
@@ -148,19 +151,6 @@ def drop_blks(train_data):
         if 'blk' in ind:
             train_data = train_data.drop(ind)
     return train_data
-
-
-def get_unique_labels(labels):
-    """
-    Get unique labels for a set of labels
-    :param labels:
-    :return:
-    """
-    unique_labels = []
-    for label in labels:
-        if label not in unique_labels:
-            unique_labels += [label]
-    return np.array(unique_labels)
 
 
 def load_data(path, drop_l, drop_b, binary, min_rt, min_mz):

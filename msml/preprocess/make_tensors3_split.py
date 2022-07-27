@@ -22,6 +22,7 @@ from PIL import Image
 from matplotlib import cm
 from pickle import dump
 import nibabel as nib
+from sklearn.model_selection import StratifiedKFold
 
 
 def get_feature_selection_method(model_name):
@@ -275,13 +276,7 @@ class MakeTensorsMultiprocess:
         self.labels_list = labels_list
         self.save = save
         self.test_run = test_run
-        # self.mz_shift = mz_shift
-        # self.rt_shift = rt_shift
         self.log2 = log
-        # self.mz_rounding = mz_rounding
-        # self.rt_rounding = rt_rounding
-        # self.final_list = []
-        # self.labels = []
         if n_samples != -1:
             self.tsv_list = self.tsv_list[:n_samples]
             self.labels_list = self.labels_list[:n_samples]
@@ -337,8 +332,6 @@ class MakeTensorsMultiprocess:
                 else:
                     tmp_rt -= self.bins['rt_bin_post'] / 2
                 rt = tmp_rt
-                # if not self.mz_shift:
-                # mz = np.floor(np.round(mz/mz_bin, 8))*mz_bin
             else:
                 rt = np.floor(np.round(rt / self.bins['rt_bin_post'], 8)) * self.bins['rt_bin_post']
 
@@ -349,16 +342,12 @@ class MakeTensorsMultiprocess:
                 else:
                     tmp_mz -= self.bins['mz_bin_post'] / 2
                 mz = tmp_mz
-                # if not self.rt_shift:
-                # rt = np.floor(np.round(rt/rt_bin, 8))*rt_bin
             else:
-                # rt = np.floor(np.round(rt/rt_bin, 8))*rt_bin
                 mz = np.floor(np.round(mz / self.bins['mz_bin_post'], 8)) * self.bins['mz_bin_post']
             if self.bins['rt_rounding'] != 0:
                 rt = np.round(rt, self.bins['rt_rounding'])
             if self.bins['mz_rounding'] != 0:
                 mz = np.round(mz, self.bins['mz_rounding'])
-            # final[min_parent][mz][rt] += np.log1p(intensity)
             if self.log2 == 'inloop':
                 final[min_parent][mz][rt] += np.log1p(intensity)
             else:
@@ -419,11 +408,6 @@ def make_lists(dirinput, path, run_name):
         samples.append(sample)
         tmp = sample.split('_')
         batch = tmp[0]
-        # sample_split = sample.split(split_on)[1].split('_')
-        # if sample_split[2] != 'validation':
-        #     tmp = sample_split[2:4]
-        # else:
-        # tmp = sample_split[1:3]
 
         label = f"{batch}_{'_'.join(tmp[-3:-1])}"
         labels_list.append(label)
@@ -494,7 +478,7 @@ def concat_and_transpose(dirinput, dirname, bins, args_dict, names_to_keep=None,
     concat = MakeTensorsMultiprocess(lists["tsv"], lists["labels"], bins,
                                      args_dict.test_run, args_dict.n_samples, args_dict.log2, dirname, args_dict.save)
 
-    pool = multiprocessing.Pool(multiprocessing.cpu_count() - 1)
+    pool = multiprocessing.Pool(multiprocessing.cpu_count() - 10)
 
     data_matrix = pool.map(concat.process,
                            range(len(concat.tsv_list))
@@ -601,10 +585,13 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, default="eco,sag,efa,kpn,blk,pool")
     parser.add_argument("--scaler", type=str, default="none")
     parser.add_argument("--combat_corr", type=int, default=0)
+    parser.add_argument("--use_test", type=int, default=0)
+    parser.add_argument("--use_valid", type=int, default=0)
     parser.add_argument("--k", type=str, default=-1, help="Number of features to keep")
     parser.add_argument("--save", type=int, default=1, help="Save images and csvs?")
     parser.add_argument("--resources_path", type=str, default='../../../../resources',
                         help="Path to input directory")
+    parser.add_argument("--experiment", type=str, default='20220706_Data_ML02/Data_FS')
     parser.add_argument("--feature_selection", type=str, default='mutual_info_classif',
                         help="Mutual Information classification cutoff")
     parser.add_argument("--feature_selection_threshold", type=float, default=0.,
@@ -640,32 +627,17 @@ if __name__ == "__main__":
         'rt_shift': args.shift
     }
 
-    out_dest = f"{args.resources_path}/matrices"
-    input_dir = f"{args.resources_path}/tsv"
+    out_dest = f"{args.resources_path}/{args.experiment}/matrices"
+    input_dir = f"{args.resources_path}/{args.experiment}/tsv"
 
     script_dir = os.path.dirname(os.path.realpath(__file__))
     dir_name = f"{script_dir}/{out_dest}/mz{args.mz_bin_post}/rt{args.rt_bin_post}/{args.spd}spd/" \
                f"combat{args.combat_corr}/shift{args.shift}/{args.scaler}/log{args.log2}/{args.feature_selection}/"
-    dir_input = f"{script_dir}/{input_dir}/mz{args.mz_bin}/rt{args.rt_bin}/{args.spd}spd/train/"
-    # valid_dir_name = f"{script_dir}/{out_dest}/mz{args.mz_bin_post}/rt{args.rt_bin_post}/{args.spd}spd/" \
-    #                  f"combat{args.combat_corr}/shift{args.shift}/{args.scaler}/log{args.log2}/{args.feature_selection}/valid/"
-    valid_dir_input = f"{script_dir}/{input_dir}/mz{args.mz_bin}/rt{args.rt_bin}/{args.spd}spd/valid/"
-    # test_dir_name = f"{script_dir}/{out_dest}/mz{args.mz_bin_post}/rt{args.rt_bin_post}/{args.spd}spd/" \
-    #                 f"combat{args.combat_corr}/shift{args.shift}/{args.scaler}/log{args.log2}/{args.feature_selection}/test/"
-    test_dir_input = f"{script_dir}/{input_dir}/mz{args.mz_bin}/rt{args.rt_bin}/{args.spd}spd/test/"
+    dir_input = f"{script_dir}/{input_dir}/mz{args.mz_bin}/rt{args.rt_bin}/{args.spd}spd/"
 
     bacteria_to_keep = None
 
-    # TODO plates now have to be in filename
-    if 'plate' in args.run_name:
-        plates_df = pd.read_csv(f'{script_dir}/{args.resources_path}/RD150_SamplePrep_Juillet_Samples.csv', index_col=0)
-        # set in case pool or blk are already in the plate
-        plate = int(args.run_name.split('_')[1])
-        blk = 'blk' if plate == 1 else 'blk_p' + str(plate)
-        bacteria_to_keep = list(
-            set([bact.lower() for x, bact in zip(plates_df['Plate'], plates_df.index) if x == plate] + [blk, 'pool']))
-        print(f'Plate #{plate} selected. Bacteria kept:{bacteria_to_keep}')
-    elif len(args.run_name.split(',')) > 1:
+    if len(args.run_name.split(',')) > 1:
         bacteria_to_keep = args.run_name.split(',')
     else:
         print('No plate specified, using them all')
@@ -695,7 +667,7 @@ if __name__ == "__main__":
     else:
         dframe_list = split_df(data_matrix.iloc[:, :1000], cols_per_split=int(1e2))
 
-    n_cpus = multiprocessing.cpu_count() - 1
+    n_cpus = multiprocessing.cpu_count() - 10
     if n_cpus > len(dframe_list):
         n_cpus = len(dframe_list)
     pool = multiprocessing.Pool(int(n_cpus))
@@ -710,7 +682,7 @@ if __name__ == "__main__":
 
     print("Finding not zeros columns...")
     dframe_list = split_df(data_matrix, cols_per_split=int(1e4))
-    n_cpus = multiprocessing.cpu_count() - 1
+    n_cpus = multiprocessing.cpu_count() - 10
     if n_cpus > len(dframe_list):
         n_cpus = len(dframe_list)
     pool = multiprocessing.Pool(int(n_cpus))
@@ -770,16 +742,15 @@ if __name__ == "__main__":
         else:
             lows += [0]
 
-    plates = get_plates(f'{script_dir}/{args.resources_path}/RD150_SamplePrep_Juillet_Samples.csv', labels, blk_plate=1)
     pool_data = data_matrix.iloc[pool_indices['indices']]
     pool_batches = np.array(batches)[pool_indices['indices']].tolist()
     pool_labels = np.array(labels)[pool_indices['indices']].tolist()
-    pool_plates = np.array(plates)[pool_indices['indices']].tolist()
+    # pool_plates = np.array(plates)[pool_indices['indices']].tolist()
 
     train_data = data_matrix.drop(pool_indices['names'])
     cats = np.delete(np.array(cats), pool_indices['indices']).tolist()
     labels = np.delete(np.array(labels), pool_indices['indices']).tolist()
-    plates = np.delete(np.array(plates), pool_indices['indices']).tolist()
+    # plates = np.delete(np.array(plates), pool_indices['indices']).tolist()
     lows = np.delete(np.array(lows), pool_indices['indices']).tolist()
     batches = np.delete(np.array(batches), pool_indices['indices']).tolist()
 
@@ -799,90 +770,6 @@ if __name__ == "__main__":
         'test': None
     }
 
-    print("\n\nValidations\n\n")
-
-    # The blks in tests are all in the same plate
-
-    # TODO Make a function so it is not as redundant for the valid and test set
-    if bacteria_to_keep is not None:
-        bacteria_to_keep = [x if 'blk' not in x else 'blk' for x in bacteria_to_keep]
-    valid_data_matrix = concat_and_transpose(valid_dir_input, dir_name, bins=bins,
-                                             args_dict=args, names_to_keep=bacteria_to_keep,
-                                             features=data_matrix.columns)
-    if args.shift:
-        valid_data_matrix2 = concat_and_transpose(valid_dir_input, dir_name, bins=bins,
-                                                  args_dict=args, names_to_keep=bacteria_to_keep,
-                                                  features=data_matrix.columns)
-        valid_data_matrix3 = concat_and_transpose(valid_dir_input, dir_name, bins=bins,
-                                                  args_dict=args, names_to_keep=bacteria_to_keep,
-                                                  features=data_matrix.columns)
-        valid_data_matrix4 = concat_and_transpose(valid_dir_input, dir_name, bins=bins,
-                                                  args_dict=args, names_to_keep=bacteria_to_keep,
-                                                  features=data_matrix.columns)
-        valid_data_matrix = pd.concat((valid_data_matrix, valid_data_matrix2, valid_data_matrix3, valid_data_matrix4),
-                                      1)
-
-    print('\nComplete valid data shape', valid_data_matrix.shape)
-
-    cols = [True if x in valid_data_matrix.columns else False for i, x in enumerate(not_zeros_col)]
-
-    # TODO solve this Problem: Duplicated column names as mz_bin_post=1!!
-    valid_data_matrix = valid_data_matrix[not_zeros_col[cols]]
-    data_matrix = data_matrix[not_zeros_col[cols]]
-
-    print('Standardization...')
-    valid_labels = valid_data_matrix.index
-    columns = valid_data_matrix.columns
-    if args.log2 == 'after':
-        valid_data_matrix = np.log1p(valid_data_matrix)  # .astype(np.float32)
-    if args.scaler != 'none':
-        valid_data_matrix = scaler.transform(valid_data_matrix)
-
-    print("Logging the data...")
-    valid_data_matrix = pd.DataFrame(valid_data_matrix, index=valid_labels, columns=columns)
-    valid_labels = valid_data_matrix.index
-    valid_lows = []
-    valid_cats = []
-    valid_batches = []
-    valid_pool_indices = {'indices': [], 'names': []}
-    for i, sample_name in enumerate(valid_labels):
-        # fname = file.split('\\')[-1]
-        cat = sample_name.split('_')[1]
-        batch = sample_name.split('_')[0]
-
-        valid_cats += [cat]
-        valid_batches += [0]
-        # valid_batches += [batch]
-        if 'pool' in sample_name:
-            valid_pool_indices['indices'] += [i]
-            valid_pool_indices['names'] += [valid_labels[i]]
-            valid_lows += [0]
-        elif 'l' in cat and 'blk' not in sample_name:
-            valid_lows += [1]
-        else:
-            valid_lows += [0]
-
-    valid_plates = get_plates(f'{script_dir}/{args.resources_path}/RD150_SamplePrep_Novembre_Samples.csv', valid_labels, blk_plate=8)
-    valid_pool_plates = np.array(valid_plates)[valid_pool_indices['indices']].tolist()
-    valid_pool_data = valid_data_matrix.iloc[valid_pool_indices['indices']]
-    valid_pool_batches = np.array(valid_batches)[valid_pool_indices['indices']].tolist()
-
-    valid_final = valid_data_matrix.drop(valid_pool_indices['names'])
-    valid_cats = np.delete(np.array(valid_cats), valid_pool_indices['indices']).tolist()
-    valid_labels = np.delete(np.array(valid_labels), valid_pool_indices['indices']).tolist()
-    valid_lows = np.delete(np.array(valid_lows), valid_pool_indices['indices']).tolist()
-    valid_batches = np.delete(np.array(valid_batches), valid_pool_indices['indices']).tolist()
-    valid_plates = np.delete(np.array(valid_plates), valid_pool_indices['indices']).tolist()
-
-    _ = count_array(valid_cats)
-
-    valid_cats = np.array(valid_cats)
-
-    valid_final.columns = final['train'].columns
-    valid_pool_data.columns = final['train'].columns
-    final['valid'] = valid_final.copy()
-    final['valid_pool'] = valid_pool_data.copy()
-
     print("\n\nTests\n\n")
 
     # The blks in tests are all in the same plate
@@ -890,20 +777,13 @@ if __name__ == "__main__":
     # TODO Make a function so it is not as redundant for the valid and test set
     if bacteria_to_keep is not None:
         bacteria_to_keep = [x if 'blk' not in x else 'blk' for x in bacteria_to_keep]
-    test_data_matrix = concat_and_transpose(test_dir_input, dir_name, bins=bins,
-                                            args_dict=args, names_to_keep=bacteria_to_keep,
-                                            features=data_matrix.columns)
-    if args.shift:
-        test_data_matrix2 = concat_and_transpose(test_dir_input, dir_name, bins=bins,
-                                                 args_dict=args, names_to_keep=bacteria_to_keep,
-                                                 features=data_matrix.columns)
-        test_data_matrix3 = concat_and_transpose(test_dir_input, dir_name, bins=bins,
-                                                 args_dict=args, names_to_keep=bacteria_to_keep,
-                                                 features=data_matrix.columns)
-        test_data_matrix4 = concat_and_transpose(test_dir_input, dir_name, bins=bins,
-                                                 args_dict=args, names_to_keep=bacteria_to_keep,
-                                                 features=data_matrix.columns)
-        test_data_matrix = pd.concat((test_data_matrix, test_data_matrix2, test_data_matrix3, test_data_matrix4), 1)
+
+    skf = StratifiedKFold(n_splits=5)
+    train_nums = np.arange(0, len(data_matrix))
+    train_inds, test_inds = skf.split(train_nums, cats['train']).__next__()
+    data_matrix, test_data_matrix = data_matrix.iloc[train_inds], data_matrix.iloc[test_inds]
+    cats['train'] = cats['train'][train_inds]
+    final['train'] = final['train'].iloc[train_inds]
 
     print('\nComplete test data shape', test_data_matrix.shape)
 
@@ -943,8 +823,7 @@ if __name__ == "__main__":
         else:
             test_lows += [0]
 
-    test_plates = get_plates(f'{script_dir}/{args.resources_path}/RD150_SamplePrep_Novembre_Samples.csv', test_labels, blk_plate=8)
-    test_pool_plates = np.array(test_plates)[test_pool_indices['indices']].tolist()
+    # test_pool_plates = np.array(test_plates)[test_pool_indices['indices']].tolist()
     test_pool_data = test_data_matrix.iloc[test_pool_indices['indices']]
     test_pool_batches = np.array(test_batches)[test_pool_indices['indices']].tolist()
 
@@ -953,7 +832,7 @@ if __name__ == "__main__":
     test_labels = np.delete(np.array(test_labels), test_pool_indices['indices']).tolist()
     test_lows = np.delete(np.array(test_lows), test_pool_indices['indices']).tolist()
     test_batches = np.delete(np.array(test_batches), test_pool_indices['indices']).tolist()
-    test_plates = np.delete(np.array(test_plates), test_pool_indices['indices']).tolist()
+    # test_plates = np.delete(np.array(test_plates), test_pool_indices['indices']).tolist()
 
     _ = count_array(test_cats)
 
@@ -964,44 +843,78 @@ if __name__ == "__main__":
     final['test'] = test_final.copy()
     final['test_pool'] = test_pool_data.copy()
 
+    print("\n\nValidations\n\n")
+
+    # The blks in tests are all in the same plate
+    skf = StratifiedKFold(n_splits=5)
+    train_nums = np.arange(0, len(data_matrix))
+    train_inds, valid_inds = skf.split(train_nums, cats['train']).__next__()
+    data_matrix, valid_data_matrix = data_matrix.iloc[train_inds], data_matrix.iloc[valid_inds]
+    cats['train'] = cats['train'][train_inds]
+    final['train'] = final['train'].iloc[train_inds]
+    print('\nComplete valid data shape', data_matrix.shape)
+
+    cols = [True if x in valid_data_matrix.columns else False for i, x in enumerate(not_zeros_col)]
+
+    # TODO solve this Problem: Duplicated column names as mz_bin_post=1!!
+    valid_data_matrix = valid_data_matrix[not_zeros_col[cols]]
+    data_matrix = data_matrix[not_zeros_col[cols]]
+
+    print('Standardization...')
+    valid_labels = valid_data_matrix.index
+    columns = valid_data_matrix.columns
+    if args.log2 == 'after':
+        valid_data_matrix = np.log1p(valid_data_matrix)  # .astype(np.float32)
+    if args.scaler != 'none':
+        valid_data_matrix = scaler.transform(valid_data_matrix)
+
+    print("Logging the data...")
+    valid_data_matrix = pd.DataFrame(valid_data_matrix, index=valid_labels, columns=columns)
+    valid_labels = valid_data_matrix.index
+    valid_lows = []
+    valid_cats = []
+    valid_batches = []
+    valid_pool_indices = {'indices': [], 'names': []}
+    for i, sample_name in enumerate(valid_labels):
+        # fname = file.split('\\')[-1]
+        cat = sample_name.split('_')[1]
+        batch = sample_name.split('_')[0]
+
+        valid_cats += [cat]
+        valid_batches += [0]
+        # valid_batches += [batch]
+        if 'pool' in sample_name:
+            valid_pool_indices['indices'] += [i]
+            valid_pool_indices['names'] += [valid_labels[i]]
+            valid_lows += [0]
+        elif 'l' in cat and 'blk' not in sample_name:
+            valid_lows += [1]
+        else:
+            valid_lows += [0]
+
+    # valid_pool_plates = np.array(valid_plates)[valid_pool_indices['indices']].tolist()
+    valid_pool_data = valid_data_matrix.iloc[valid_pool_indices['indices']]
+    valid_pool_batches = np.array(valid_batches)[valid_pool_indices['indices']].tolist()
+
+    valid_final = valid_data_matrix.drop(valid_pool_indices['names'])
+    valid_cats = np.delete(np.array(valid_cats), valid_pool_indices['indices']).tolist()
+    valid_labels = np.delete(np.array(valid_labels), valid_pool_indices['indices']).tolist()
+    valid_lows = np.delete(np.array(valid_lows), valid_pool_indices['indices']).tolist()
+    valid_batches = np.delete(np.array(valid_batches), valid_pool_indices['indices']).tolist()
+    # valid_plates = np.delete(np.array(valid_plates), valid_pool_indices['indices']).tolist()
+
+    _ = count_array(valid_cats)
+
+    valid_cats = np.array(valid_cats)
+
+    valid_final.columns = final['train'].columns
+    valid_pool_data.columns = final['train'].columns
+    final['valid'] = valid_final.copy()
+    final['valid_pool'] = valid_pool_data.copy()
+
     print('\nComplete data shape', final['train'].shape)
     print('\nComplete valid data shape', final['valid'].shape)
     print('\nComplete test data shape', final['test'].shape)
-
-    if args.combat_corr:
-        from combat.pycombat import pycombat
-
-        df = pd.concat((final['train'], final['pool'], final['valid'], final['valid_pool'], final['test'], final['test_pool']), 0)
-        all_batches = np.concatenate((batches, pool_batches, valid_batches, valid_pool_batches, test_batches, test_pool_batches), 0)
-        all_plates = np.concatenate((plates, pool_plates, valid_plates, valid_pool_plates, test_plates, test_pool_plates), 0)
-        df = df.fillna(0)
-        print("Combat Correction!")
-
-        print('Number of Nans:', df.isna().sum().sum())
-        df2 = pycombat(df.T, all_plates)  # ref batch is not working here... but it should work
-
-        # data = standard_minmax_scaler.fit_transform(df2.values.T)
-        data = df2.values.T
-
-        final['train'] = pd.DataFrame(data[:final['train'].shape[0]], index=final['train'].index, columns=df.columns)
-        final['pool'] = pd.DataFrame(data[final['train'].shape[0]:final['train'].shape[0] + final['pool'].shape[0]],
-                                     index=final['pool'].index, columns=df.columns)
-        final['valid'] = pd.DataFrame(data[final['train'].shape[0] + final['pool'].shape[0]:final['train'].shape[0] +
-                                                                                           final['pool'].shape[0] +
-                                                                                           final['valid'].shape[0]],
-                                     index=final['valid'].index, columns=df.columns)
-        final['valid_pool'] = pd.DataFrame(
-            data[final['train'].shape[0] + final['pool'].shape[0] + final['valid'].shape[0]:final['train'].shape[0] + final['pool'].shape[0] + final['valid'].shape[0] + final['valid_pool'].shape[0]],
-            index=final['valid_pool'].index, columns=df.columns)
-        final['test'] = pd.DataFrame(data[final['train'].shape[0] + final['pool'].shape[0] + final['valid'].shape[0] + final['valid_pool'].shape[0]:final['train'].shape[0] +
-                                                                                           final['pool'].shape[0] + final['valid'].shape[0] + final['valid_pool'].shape[0] +
-                                                                                           final['test'].shape[0]],
-                                     index=final['test'].index, columns=df.columns)
-        final['test_pool'] = pd.DataFrame(
-            data[final['train'].shape[0] + final['pool'].shape[0] + final['valid'].shape[0] + final['valid_pool'].shape[0] + final['test'].shape[0]:],
-            index=final['test_pool'].index, columns=df.columns)
-        print(
-            f"data: {data.shape}, final train: {data[:final['train'].shape[0]].shape}, index: {len(final['train'].index)}, columns: {len(final['train'].columns)}")
 
     fs = get_feature_selection_method(args.feature_selection)
 
@@ -1010,10 +923,11 @@ if __name__ == "__main__":
                  dirname=dir_name, k=int(args.k), binary=args.binary, run_name=args.run_name,
                  combat_corr=args.combat_corr)
 
-    args.mutual_info_path = f'../../resources/matrices/mz{args.mz_bin_post}/rt{args.rt_bin_post}/' \
+    args.mutual_info_path = f'{args.resources_path}/matrices/mz{args.mz_bin_post}/rt{args.rt_bin_post}/' \
                             f'{args.spd}spd/combat{args.combat_corr}/shift{args.shift}/' \
-                            f'{args.scaler}/log{args.log2}/{args.feature_selection}/train/{args.run_name}/' \
+                            f'{args.scaler}/log{args.log2}/{args.feature_selection}/{args.run_name}/' \
                             f'{args.feature_selection}_scores_binary{args.binary}_gt{args.feature_selection_threshold}.csv'
+    args.mutual_info_path = f'{dir_name}/{args.run_name}/{args.feature_selection}_scores_binary{str(args.binary)}.csv'
     if args.k > -1:
         features = pd.read_csv(args.mutual_info_path)['minp_maxp_rt_mz'].to_numpy()[:args.k]
     else:
@@ -1043,21 +957,23 @@ if __name__ == "__main__":
     train_data.iloc[:] = np.round(np.nan_to_num(train_data), 2)
     pool_data.iloc[:] = np.round(np.nan_to_num(pool_data), 2)
 
-    os.makedirs(f'{dir_name}/{args.run_name}', exist_ok=True)
-    os.makedirs(f'{dir_name}/{args.run_name}', exist_ok=True)
+    if args.binary:
+        label = 'BLK'
+    else:
+        label = 'BACT'
 
     if args.combat_corr:
         final['test'].to_csv(
-            f'{dir_name}/{args.run_name}/test_inputs_{args.run_name}_combat.csv',
+            f'{dir_name}/{args.run_name}/test_inputs_combat.csv',
             index=True, index_label='ID')
         final['test_pool'].to_csv(
-            f'{dir_name}/{args.run_name}/test_pool_inputs_{args.run_name}_combat.csv',
+            f'{dir_name}/{args.run_name}/test_pool_inputs_combat.csv',
             index=True, index_label='ID')
         final['valid'].to_csv(
-            f'{dir_name}/{args.run_name}/valid_inputs_{args.run_name}_combat.csv',
+            f'{dir_name}/{args.run_name}/valid_inputs_combat.csv',
             index=True, index_label='ID')
         final['valid_pool'].to_csv(
-            f'{dir_name}/{args.run_name}/valid_pool_inputs_{args.run_name}_combat.csv',
+            f'{dir_name}/{args.run_name}/valid_pool_inputs_combat.csv',
             index=True, index_label='ID')
         test_final.to_csv(
             f'{dir_name}/{args.run_name}/test_inputs.csv',
