@@ -40,7 +40,14 @@ The resulting tsv files are stored in `../../resources/mzdb/$spd/$group/`
 ## Train deep learning model
 Command line example:
 
-`python3 msml\dl\train\mlp\train_ae_classifier3.py --triplet_loss=1 --predict_tests=1`
+`python3 msml\dl\train\mlp\train_ae_classifier.py --triplet_loss=1 --predict_tests=1 --dann_sets=0 --balanced_rec_loader=0 --dann_plates=0 --zinb=0 --variational=0 --use_valid=1 --use_test=1`
+
+For your data to work, it should be a matrix: rows are samples, columns are features. Feature names can be whatever,
+but the row names (in the first column named ID), the names should be as such: {experiment_name}_{class}_{batch_number}_{id}
+
+*** The batch number should start with the letter `p`, followed by batch number. This is because for the experiment
+it was designed for, the batches were the plates in which the bacteria grew. It should change soon!
+e.g.: rd159_blk_p16_09 
 
 With the default settings, the data needs to be in `'../../resources//20220706_Data_ML02/Data_FS/matrices/mz0.2/rt20.0/200spd/combat0/shift0/none/loginloop/mutual_info_classif/eco,sag,efa,kpn,blk,pool//train_inputs.csv'`
 
