@@ -430,7 +430,7 @@ def make_lists(dirinput, path, run_name):
         # else:
         # tmp = sample_split[1:3]
 
-        label = f"{batch}_{'_'.join(tmp[-5:-3])}".lower()
+        label = f"{batch}_{'_'.join(tmp[-5:-2])}".lower()
         labels_list.append(label)
 
     categories = [x.split('_')[0] for x in labels_list]

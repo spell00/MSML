@@ -552,8 +552,9 @@ class Train:
                 data['inputs'][group] = data['inputs'][group].iloc[:, 1:]
                 data['cats'][group] = np.array(
                     [np.where(x == unique_labels)[0][0] for i, x in enumerate(data['labels'][group])])
+                import re
                 subcategories = np.unique(
-                    ['v' for x in data['names'][group]])
+                    [re.split('\d+', x.split('_')[3])[0] for x in data['names'][group]])
                 subcategories = np.array([x for x in subcategories if x != ''])
                 data['subs'][group] = {x: np.array([]) for x in subcategories}
                 for sub in subcategories:
@@ -569,7 +570,7 @@ class Train:
         subcategories = np.unique(
             np.concatenate(
                 [np.unique(
-                    ['v' for x in data['names'][group]]) for group in
+                    [re.split('\d+', x.split('_')[3])[0] for x in data['names'][group]]) for group in
                     list(data['names'].keys())
                 ]
             )

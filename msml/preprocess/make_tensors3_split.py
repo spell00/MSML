@@ -409,7 +409,7 @@ def make_lists(dirinput, path, run_name):
         tmp = sample.split('_')
         batch = tmp[0]
 
-        label = f"{batch}_{'_'.join(tmp[-3:-1])}"
+        label = f"{batch}_{'_'.join(tmp[-3:])}"
         labels_list.append(label)
 
     categories = [x.split('_')[0] for x in labels_list]
@@ -591,7 +591,7 @@ if __name__ == "__main__":
     parser.add_argument("--save", type=int, default=1, help="Save images and csvs?")
     parser.add_argument("--resources_path", type=str, default='../../../../resources',
                         help="Path to input directory")
-    parser.add_argument("--experiment", type=str, default='20220706_Data_ML02/Data_FS')
+    parser.add_argument("--experiment", type=str, default='20220706_Data_ML02/Data_Dorte')
     parser.add_argument("--feature_selection", type=str, default='mutual_info_classif',
                         help="Mutual Information classification cutoff")
     parser.add_argument("--feature_selection_threshold", type=float, default=0.,
