@@ -1,6 +1,6 @@
 numpy
 scikit_learn==1.1.1
-pandas~=1.1.5
+pandas~=1.4.3
 scikit-optimize==0.9.0
 pytest
 pytest-cov
@@ -20,6 +20,8 @@ PTable
 torch
 torchvision
 tensorboardX
+tensorboard
+tensorflow
 ax-platform
 psutil
 scikit-image
@@ -28,6 +30,7 @@ mpmath
 patsy
 umap-learn
 shapely
+rpy2
 
 # R packages:
 # install.packages("harmony")

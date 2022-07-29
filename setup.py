@@ -12,7 +12,7 @@ from setuptools import setup
 setup(
     name='msml',
     version='0.1',
-    packages=['msml', 'msml.dl', 'msml.dl.utils', 'msml.dl.models', 'msml.dl.models.pytorch',
+    packages=['msml', 'msml.utils', 'msml.dl.models.pytorch.utils', 'msml.dl', 'msml.dl.models', 'msml.dl.models.pytorch',
               'msml.dl.train',  "msml.scikit_learn", "msml.scikit_learn.train"],
     url='',
     license='',

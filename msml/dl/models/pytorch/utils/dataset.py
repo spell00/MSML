@@ -14,11 +14,9 @@ import numpy as np
 from torch.utils.data import Dataset
 import random
 import pandas as pd
-from msml.dl.models.pytorch.cnn_pytorch import CNN
 from sklearn.preprocessing import minmax_scale as scale
 from sklearn.preprocessing import MinMaxScaler, RobustScaler, Normalizer, StandardScaler
 from torch.autograd import Variable
-from torchvision import transforms
 from torchvision import transforms
 from torch.utils.data import DataLoader
 import torchvision
