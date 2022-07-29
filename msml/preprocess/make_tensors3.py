@@ -740,7 +740,7 @@ if __name__ == "__main__":
             scaler = MinMaxScaler()
         else:
             exit("Scaler not in ['robust', 'standard', 'minmax']")
-        labels = data_matrix.index
+        # labels = data_matrix.index
         columns = data_matrix.columns
         data_matrix = scaler.fit_transform(data_matrix)
         dump(scaler, open(f'{dir_name}/standard_scaler.pkl', 'wb'))
@@ -749,8 +749,10 @@ if __name__ == "__main__":
     else:
         print('Scaler must be one of robust, standard, minmax or none')
 
-    data_matrix = pd.DataFrame(data_matrix, index=labels, columns=columns)
-    labels = data_matrix.index
+    # The p (for plate) is removed to conform with the machine learning in the next step
+    labels = np.array(['_'.join(label.split('_p')) for label in labels])
+    data_matrix = pd.DataFrame(data_matrix.values, index=labels, columns=columns)
+    # labels = data_matrix.index
     lows = []
     cats = []
     batches = []
@@ -832,6 +834,8 @@ if __name__ == "__main__":
 
     print('Standardization...')
     valid_labels = valid_data_matrix.index
+    # The p (for plate) is removed to conform with the machine learning in the next step
+    valid_labels = ['_'.join(label.split('_p')) for label in valid_labels]
     columns = valid_data_matrix.columns
     if args.log2 == 'after':
         valid_data_matrix = np.log1p(valid_data_matrix)  # .astype(np.float32)
@@ -839,7 +843,7 @@ if __name__ == "__main__":
         valid_data_matrix = scaler.transform(valid_data_matrix)
 
     print("Logging the data...")
-    valid_data_matrix = pd.DataFrame(valid_data_matrix, index=valid_labels, columns=columns)
+    valid_data_matrix = pd.DataFrame(valid_data_matrix.values, index=valid_labels, columns=columns)
     valid_labels = valid_data_matrix.index
     valid_lows = []
     valid_cats = []
@@ -913,6 +917,8 @@ if __name__ == "__main__":
 
     print('Standardization...')
     test_labels = test_data_matrix.index
+    # The p (for plate) is removed to conform with the machine learning in the next step
+    test_labels = ['_'.join(label.split('_p')) for label in test_labels]
     columns = test_data_matrix.columns
     if args.log2 == 'after':
         test_data_matrix = np.log1p(test_data_matrix)  # .astype(np.float32)
@@ -920,7 +926,7 @@ if __name__ == "__main__":
         test_data_matrix = scaler.transform(test_data_matrix)
 
     print("Logging the data...")
-    test_data_matrix = pd.DataFrame(test_data_matrix, index=test_labels, columns=columns)
+    test_data_matrix = pd.DataFrame(test_data_matrix.values, index=test_labels, columns=columns)
     test_labels = test_data_matrix.index
     test_lows = []
     test_cats = []

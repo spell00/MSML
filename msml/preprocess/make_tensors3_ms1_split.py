@@ -578,7 +578,7 @@ def get_plates(path, labels, blk_plate=1):
             if 'blk_p' not in label:
                 plates += [blk_plate]
             else:
-                plate = int(label.split('_')[2].split('p')[1].split('-')[0])
+                plate = int(label.split('_')[2].split('-')[0])
                 plates += [plate]
     return plates
 
@@ -734,7 +734,7 @@ if __name__ == "__main__":
             scaler = MinMaxScaler()
         else:
             exit("Scaler not in ['robust', 'standard', 'minmax']")
-        labels = data_matrix.index
+        labels = data_matrix.index  # TODO Remove this
         columns = data_matrix.columns
         data_matrix = scaler.fit_transform(data_matrix)
         dump(scaler, open(f'{dir_name}/standard_scaler.pkl', 'wb'))
@@ -742,9 +742,9 @@ if __name__ == "__main__":
         print('No Normalization.')
     else:
         print('Scaler must be one of robust, standard, minmax or none')
-
-    data_matrix = pd.DataFrame(data_matrix, index=labels, columns=columns)
-    labels = data_matrix.index
+    labels = np.array(['_'.join(label.split('_p')) for label in labels])
+    data_matrix = pd.DataFrame(data_matrix.values, index=labels, columns=columns)
+    labels = data_matrix.index  # TODO remove this
     lows = []
     cats = []
     batches = []
