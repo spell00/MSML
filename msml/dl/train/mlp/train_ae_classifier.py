@@ -12,6 +12,7 @@ import torch
 from itertools import cycle
 from torch import nn
 import os
+import re
 from tensorboardX import SummaryWriter
 from ax.service.managed_loop import optimize
 from sklearn.metrics import matthews_corrcoef as MCC
@@ -543,16 +544,15 @@ class Train:
                 data['labels'][group] = np.array([d.split('_')[1] for d in data['names'][group]])
                 unique_labels = get_unique_labels(data['labels'][group])
                 # data['batches'][group] = np.array([int(d.split('_')[0]) for d in data['names'][group]])
-                try:
-                    data['batches'][group] = np.array([int(d.split('_')[2].split('p')[1]) for d in data['names'][group]])
-                except:
-                    data['batches'][group] = np.array([int(d.split('_')[0]) for d in data['names'][group]])
+                # try:
+                data['batches'][group] = np.array([int(''.join(re.split('\D+', d.split('_')[2]))) for d in data['names'][group]])
+                # except:
+                #     data['batches'][group] = np.array([int(re.split('\w+', d.split('_')[2])) for d in data['names'][group]])
 
                 # Drops the ID column
                 data['inputs'][group] = data['inputs'][group].iloc[:, 1:]
                 data['cats'][group] = np.array(
                     [np.where(x == unique_labels)[0][0] for i, x in enumerate(data['labels'][group])])
-                import re
                 subcategories = np.unique(
                     [re.split('\d+', x.split('_')[3])[0] for x in data['names'][group]])
                 subcategories = np.array([x for x in subcategories if x != ''])

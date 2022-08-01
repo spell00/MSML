@@ -750,7 +750,7 @@ if __name__ == "__main__":
         print('Scaler must be one of robust, standard, minmax or none')
 
     # The p (for plate) is removed to conform with the machine learning in the next step
-    labels = np.array(['_'.join(label.split('_p')) for label in labels])
+    # labels = np.array(['_'.join(label.split('_p')) for label in labels])
     data_matrix = pd.DataFrame(data_matrix.values, index=labels, columns=columns)
     # labels = data_matrix.index
     lows = []
@@ -835,7 +835,7 @@ if __name__ == "__main__":
     print('Standardization...')
     valid_labels = valid_data_matrix.index
     # The p (for plate) is removed to conform with the machine learning in the next step
-    valid_labels = ['_'.join(label.split('_p')) for label in valid_labels]
+    # valid_labels = ['_'.join(label.split('_p')) for label in valid_labels]
     columns = valid_data_matrix.columns
     if args.log2 == 'after':
         valid_data_matrix = np.log1p(valid_data_matrix)  # .astype(np.float32)
@@ -918,7 +918,7 @@ if __name__ == "__main__":
     print('Standardization...')
     test_labels = test_data_matrix.index
     # The p (for plate) is removed to conform with the machine learning in the next step
-    test_labels = ['_'.join(label.split('_p')) for label in test_labels]
+    # test_labels = ['_'.join(label.split('_p')) for label in test_labels]
     columns = test_data_matrix.columns
     if args.log2 == 'after':
         test_data_matrix = np.log1p(test_data_matrix)  # .astype(np.float32)

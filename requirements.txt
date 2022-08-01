@@ -35,6 +35,5 @@ rpy2
 # R packages:
 # install.packages("harmony")
 # install.packages("sva")
-# install.packages("sva")
 # BiocManager::install("zinbwave")
 # install.packages("factor")

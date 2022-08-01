@@ -742,7 +742,7 @@ if __name__ == "__main__":
         print('No Normalization.')
     else:
         print('Scaler must be one of robust, standard, minmax or none')
-    labels = np.array(['_'.join(label.split('_p')) for label in labels])
+    # labels = np.array(['_'.join(label.split('_p')) for label in labels])
     data_matrix = pd.DataFrame(data_matrix.values, index=labels, columns=columns)
     labels = data_matrix.index  # TODO remove this
     lows = []
