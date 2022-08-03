@@ -28,6 +28,8 @@ from msml.dl.models.pytorch.utils.utils import get_optimizer, to_categorical, ge
     log_traces, get_best_values_from_tb, get_best_values, add_to_logger
 
 import warnings
+from datetime import datetime
+
 
 warnings.filterwarnings("ignore")
 
@@ -78,6 +80,7 @@ class Train:
         Returns:
 
         """
+        start_time = datetime.now()
         if not self.args.dann_sets and not self.args.dann_plates:
             # gamma = 0 will ensure DANN is not learned
             params['gamma'] = 0
@@ -376,6 +379,8 @@ class Train:
             except:
                 pass
             tb_logging.logging(best_values)
+
+        print('Duration: {}'.format(datetime.now() - start_time))
 
         return best_closs
 
@@ -711,6 +716,7 @@ if __name__ == "__main__":
     parser.add_argument('--train_after_warmup', type=int, default=1)
     parser.add_argument('--warmup', type=int, default=1000)
     parser.add_argument('--n_epochs', type=int, default=10000)
+    parser.add_argument('--n_trials', type=int, default=250)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rec_loss', type=str, default='mse')
     parser.add_argument('--tied_weights', type=int, default=1)
@@ -759,8 +765,8 @@ if __name__ == "__main__":
         evaluation_function=train.train,
         objective_name='loss',
         minimize=True,
-        total_trials=250,
-        random_seed=4,
+        total_trials=args.n_trials,
+        random_seed=42,
 
     )
 

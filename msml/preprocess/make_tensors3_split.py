@@ -478,7 +478,7 @@ def concat_and_transpose(dirinput, dirname, bins, args_dict, names_to_keep=None,
     concat = MakeTensorsMultiprocess(lists["tsv"], lists["labels"], bins,
                                      args_dict.test_run, args_dict.n_samples, args_dict.log2, dirname, args_dict.save)
 
-    pool = multiprocessing.Pool(multiprocessing.cpu_count() - 10)
+    pool = multiprocessing.Pool(multiprocessing.cpu_count() - 1)
 
     data_matrix = pool.map(concat.process,
                            range(len(concat.tsv_list))
@@ -667,7 +667,7 @@ if __name__ == "__main__":
     else:
         dframe_list = split_df(data_matrix.iloc[:, :1000], cols_per_split=int(1e2))
 
-    n_cpus = multiprocessing.cpu_count() - 10
+    n_cpus = multiprocessing.cpu_count() - 1
     if n_cpus > len(dframe_list):
         n_cpus = len(dframe_list)
     pool = multiprocessing.Pool(int(n_cpus))
@@ -682,7 +682,7 @@ if __name__ == "__main__":
 
     print("Finding not zeros columns...")
     dframe_list = split_df(data_matrix, cols_per_split=int(1e4))
-    n_cpus = multiprocessing.cpu_count() - 10
+    n_cpus = multiprocessing.cpu_count() - 1
     if n_cpus > len(dframe_list):
         n_cpus = len(dframe_list)
     pool = multiprocessing.Pool(int(n_cpus))
